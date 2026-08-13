@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ZTF Candidate Review</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --keep: #2ea043;
+    --keep-hover: #3fb950;
+    --remove: #da3633;
+    --agn: #d29922;
+    --active: #1f6feb;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    background: var(--panel); display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; color: #fff; }
+  header .sub { font-size: 12px; color: var(--muted); }
+  header .hint { font-size: 11px; color: #6e7681; margin-left: auto; }
+  .layout { flex: 1; display: flex; overflow: hidden; }
+
+  /* Sidebar */
+  .sidebar {
+    width: 235px; flex-shrink: 0; border-right: 1px solid var(--border);
+    background: var(--panel); display: flex; flex-direction: column; overflow: hidden;
+  }
+  .sidebar-header {
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .sidebar-header h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); margin: 0;
+  }
+  input.txt, textarea#csvInput, select.sel {
+    background: #0d1117; border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 5px 8px; font-size: 11px; font-family: monospace;
+  }
+  textarea#csvInput { width: 100%; height: 50px; resize: vertical; }
+  .load-btn {
+    background: var(--accent); color: #0d1117; border: none; border-radius: 6px;
+    padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .load-btn:hover { opacity: 0.85; }
+  .source-list { flex: 1; overflow-y: auto; }
+  .group-header {
+    padding: 7px 12px; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--muted); background: #10151c;
+    border-bottom: 1px solid var(--border); border-top: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 1; font-weight: 700;
+  }
+  .group-header.agn { color: var(--agn); }
+  .group-empty { padding: 8px 12px; font-size: 11px; color: #6e7681; font-style: italic; }
+  .source-item {
+    padding: 9px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
+    font-size: 13px; display: flex; flex-direction: column; gap: 2px;
+  }
+  .source-item:hover { background: #1c2128; }
+  .source-item.active { background: var(--active); color: #fff; }
+  .source-item .name { font-weight: 600; font-family: monospace; }
+  .source-item .coords { font-size: 10px; color: var(--muted); }
+  .source-item.active .coords { color: #cdd9e5; }
+  .badge {
+    display: inline-block; color: #fff; font-size: 9px; padding: 1px 5px;
+    border-radius: 4px; margin-left: 6px; vertical-align: middle; font-weight: 600;
+  }
+  .badge.kept { background: var(--keep); }
+  .badge.agn { background: var(--agn); color: #1c1500; }
+  .badge.unk { background: #484f58; }
+  .empty-msg { padding: 16px 12px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  /* Main */
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .viewers { flex: 2; display: flex; min-height: 0; border-bottom: 1px solid var(--border); }
+  .viewer {
+    position: relative; min-width: 0; display: flex; flex-direction: column;
+  }
+  .viewer.alerce { flex: 1.05; border-right: 1px solid var(--border); }
+  .viewer.legacy { flex: 1; }
+  .viewer iframe { width: 100%; height: 100%; border: none; background: #fff; flex: 1; }
+  .frame-placeholder {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 13px; background: #010409; text-align: center; padding: 20px;
+  }
+  .frame-toolbar {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    display: flex; gap: 6px; align-items: center;
+  }
+  .frame-toolbar a, .frame-toolbar button, .frame-toolbar select {
+    background: rgba(22,27,34,0.92); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 9px; font-size: 11px; text-decoration: none; cursor: pointer;
+  }
+  .frame-toolbar a:hover, .frame-toolbar button:hover { background: #21262d; }
+  .frame-toolbar .zoomlbl { font-size: 11px; color: var(--muted); padding: 0 2px; }
+
+  /* Keep panel */
+  .keep-panel { flex: 1.15; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .keep-toolbar {
+    padding: 9px 14px; border-bottom: 1px solid var(--border); display: flex;
+    align-items: center; justify-content: space-between; gap: 10px; flex-shrink: 0;
+  }
+  .keep-toolbar h2 { font-size: 13px; margin: 0 0 4px 0; font-weight: 600; color: #fff; }
+  .keep-toolbar .current { font-size: 12px; color: var(--muted); font-family: monospace; }
+  .btn-row { display: flex; gap: 8px; }
+  .keep-btn {
+    background: var(--keep); color: #fff; border: none; border-radius: 6px;
+    padding: 7px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .keep-btn:hover:not(:disabled) { background: var(--keep-hover); }
+  .keep-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .keep-btn.kept { background: #30363d; color: var(--muted); }
+  .export-btn {
+    background: transparent; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 12px; font-size: 12px; cursor: pointer;
+  }
+  .export-btn:hover { background: #1c2128; }
+  .keep-table-wrap { flex: 1; overflow-y: auto; }
+  table.keep-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.keep-table th, table.keep-table td {
+    padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border);
+  }
+  table.keep-table th {
+    color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10px;
+    letter-spacing: 0.04em; position: sticky; top: 0; background: var(--panel); z-index: 1;
+  }
+  table.keep-table td.mono { font-family: monospace; }
+  table.keep-table tr:hover { background: #1c2128; }
+  table.keep-table select, table.keep-table input {
+    background: #0d1117; border: 1px solid var(--border); color: var(--text);
+    border-radius: 5px; padding: 3px 6px; font-size: 11px; font-family: monospace;
+  }
+  table.keep-table input.z { width: 88px; }
+  .remove-btn {
+    background: transparent; color: var(--remove); border: 1px solid var(--border);
+    border-radius: 5px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+  }
+  .remove-btn:hover { background: var(--remove); color: #fff; }
+  .empty-keep { padding: 18px 14px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ZTF Candidate Review</h1>
+  <span class="sub" id="countLabel">0 candidates loaded</span>
+  <span class="hint">&uarr;/&darr; navigate &middot; K keep/unkeep</span>
+</header>
+
+<div class="layout">
+
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h2>Candidates</h2>
+      <input id="csvFilename" class="txt" type="text" value="candidates.csv" style="width:100%;">
+      <button class="load-btn" onclick="loadFromServer()">Reload from file</button>
+      <textarea id="csvInput" placeholder="...or paste CSV manually&#10;oid,ra,dec,gaia_agn"></textarea>
+      <button class="load-btn" onclick="loadPastedCsv()">Load pasted CSV</button>
+    </div>
+    <div class="source-list" id="sourceList">
+      <div class="empty-msg">
+        No candidates loaded yet. Point the filename field at the CSV written by
+        <code>early_color_classifier.py --out</code> and click "Reload from file".
+      </div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="viewers">
+      <div class="viewer alerce">
+        <div class="frame-toolbar" id="alerceToolbar" style="display:none;">
+          <a id="alerceExternal" href="#" target="_blank" rel="noopener">ALeRCE &#8599;</a>
+        </div>
+        <iframe id="alerceFrame" style="display:none;"></iframe>
+        <div class="frame-placeholder" id="alercePlaceholder">
+          Select a source to load its ALeRCE page.
+          <br><br>
+          <span style="font-size:11px;">If ALeRCE refuses to embed (X-Frame-Options),
+          use the "ALeRCE &#8599;" link.</span>
+        </div>
+      </div>
+
+      <div class="viewer legacy">
+        <div class="frame-toolbar" id="legacyToolbar" style="display:none;">
+          <select id="lsLayer" class="sel" onchange="updateLegacyFrame()">
+            <option value="ls-dr11">ls-dr11</option>
+            <option value="ls-dr10">ls-dr10</option>
+            <option value="ls-dr10-model">ls-dr10-model</option>
+            <option value="ls-dr9">ls-dr9</option>
+            <option value="unwise-neo7">unwise-neo7</option>
+            <option value="sdss">sdss</option>
+            <option value="galex">galex</option>
+          </select>
+          <button onclick="bumpZoom(-1)">&minus;</button>
+          <span class="zoomlbl" id="zoomLabel">z16</span>
+          <button onclick="bumpZoom(1)">+</button>
+          <a id="legacyExternal" href="#" target="_blank" rel="noopener">&#8599;</a>
+        </div>
+        <iframe id="legacyFrame" style="display:none;"></iframe>
+        <div class="frame-placeholder" id="legacyPlaceholder">
+          Legacy Survey cutout will load here.
+        </div>
+      </div>
+    </div>
+
+    <div class="keep-panel">
+      <div class="keep-toolbar">
+        <div>
+          <h2>Follow-up List</h2>
+          <span class="current" id="currentSourceLabel">No source selected</span>
+        </div>
+        <div class="btn-row">
+          <button class="keep-btn" id="keepBtn" onclick="toggleKeep()" disabled>Keep</button>
+          <button class="export-btn" onclick="exportKeepCsv()">Export CSV</button>
+        </div>
+      </div>
+      <div class="keep-table-wrap">
+        <table class="keep-table" id="keepTable">
+          <thead>
+            <tr>
+              <th>Name</th><th>RA</th><th>Dec</th><th>Gaia AGN</th>
+              <th>Host Spectrum?</th><th>Redshift</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="keepTbody"></tbody>
+        </table>
+        <div class="empty-keep" id="emptyKeep">
+          No sources kept yet. Select a source and click "Keep" to add it here.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+
+let candidates = [];
+let kept = [];
+let activeOid = null;
+let hasAgnColumn = false;
+let lsZoom = 16;
+
+const HOST_SPEC_OPTIONS = ["None", "SDSS", "DESI", "Other"];
+
+/* ---------------------------------------------------------------- parsing */
+
+function splitCsvLine(line) {
+  const cells = [];
+  let cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') { inQ = false; }
+      else { cur += ch; }
+    } else if (ch === '"') { inQ = true; }
+    else if (ch === ",") { cells.push(cur); cur = ""; }
+    else { cur += ch; }
+  }
+  cells.push(cur);
+  return cells.map(c => c.trim());
+}
+
+function parseCsv(text) {
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length < 2) return { rows: [], headers: [] };
+  const headers = splitCsvLine(lines[0]);
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = splitCsvLine(lines[i]);
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = cells[idx]; });
+    if (row.oid) rows.push(row);
+  }
+  return { rows, headers };
+}
+
+/* pandas writes True/False/"" (NaN -> empty). Empty/absent => unknown (null). */
+function parseTriBool(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim().toLowerCase();
+  if (s === "" || s === "nan" || s === "none") return null;
+  if (["true", "1", "yes", "y", "t"].includes(s)) return true;
+  if (["false", "0", "no", "n", "f"].includes(s)) return false;
+  return null;
+}
+
+function num(v) {
+  if (v === undefined || v === null || String(v).trim() === "") return null;
+  const f = parseFloat(v);
+  return isNaN(f) ? null : f;
+}
+
+function ingest(rows, headers, label) {
+  hasAgnColumn = headers.includes("gaia_agn");
+  candidates = rows.map(r => ({
+    oid: r.oid,
+    ra: num(r.ra),
+    dec: num(r.dec),
+    gr_color: num(r.gr_color),
+    nuclear_sigma: num(r.nuclear_sigma),
+    is_rising: r.is_rising,
+    gaia_agn: parseTriBool(r.gaia_agn),
+    gaia_agn_grade: r.gaia_agn_grade || "",
+    gaia_agn_prob: num(r.gaia_agn_prob),
+    gaia_agn_z: num(r.gaia_agn_z)
+  }));
+  activeOid = null;
+  renderSourceList();
+  document.getElementById("countLabel").textContent =
+    `${candidates.length} candidates loaded${label ? " (from " + label + ")" : ""}`;
+}
+
+async function loadFromServer() {
+  const filename = document.getElementById("csvFilename").value.trim() || "candidates.csv";
+  try {
+    const resp = await fetch(filename, { cache: "no-store" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const { rows, headers } = parseCsv(await resp.text());
+    if (rows.length === 0) {
+      document.getElementById("countLabel").textContent = `${filename}: no valid rows found`;
+      return;
+    }
+    ingest(rows, headers, filename);
+  } catch (err) {
+    console.warn(`Could not load ${filename}:`, err.message);
+    document.getElementById("countLabel").textContent = `Could not load ${filename}`;
+  }
+}
+
+function loadPastedCsv() {
+  const { rows, headers } = parseCsv(document.getElementById("csvInput").value);
+  if (rows.length === 0) {
+    alert("No valid rows found. The CSV needs at least an 'oid' column (and ideally ra/dec).");
+    return;
+  }
+  ingest(rows, headers, "pasted");
+}
+
+/* --------------------------------------------------------------- sidebar */
+
+function makeSourceItem(c) {
+  const item = document.createElement("div");
+  item.className = "source-item" + (c.oid === activeOid ? " active" : "");
+  item.onclick = () => selectSource(c.oid);
+
+  const isKept = kept.some(k => k.oid === c.oid);
+  const coordStr = (c.ra !== null && c.dec !== null)
+    ? `RA ${c.ra.toFixed(4)}  Dec ${c.dec.toFixed(4)}`
+    : "no coords";
+
+  let badges = "";
+  if (isKept) badges += '<span class="badge kept">kept</span>';
+  if (c.gaia_agn === true) {
+    badges += `<span class="badge agn">AGN${c.gaia_agn_grade === "likely" ? "!" : "?"}</span>`;
+  } else if (hasAgnColumn && c.gaia_agn === null) {
+    badges += '<span class="badge unk">no AGN check</span>';
+  }
+
+  const extra = [];
+  if (c.gr_color !== null) extra.push(`g-r ${c.gr_color.toFixed(2)}`);
+  if (c.nuclear_sigma !== null) extra.push(`${c.nuclear_sigma.toFixed(2)}\u03C3`);
+
+  item.innerHTML =
+    `<div class="name">${c.oid}${badges}</div>` +
+    `<div class="coords">${coordStr}${extra.length ? "  |  " + extra.join("  |  ") : ""}</div>`;
+  return item;
+}
+
+function appendGroup(parent, title, items, agnStyle) {
+  const h = document.createElement("div");
+  h.className = "group-header" + (agnStyle ? " agn" : "");
+  h.textContent = `${title} (${items.length})`;
+  parent.appendChild(h);
+  if (items.length === 0) {
+    const e = document.createElement("div");
+    e.className = "group-empty";
+    e.textContent = "none";
+    parent.appendChild(e);
+    return;
+  }
+  items.forEach(c => parent.appendChild(makeSourceItem(c)));
+}
+
+function renderSourceList() {
+  const list = document.getElementById("sourceList");
+  if (candidates.length === 0) {
+    list.innerHTML = '<div class="empty-msg">No candidates loaded yet.</div>';
+    return;
+  }
+  list.innerHTML = "";
+  if (!hasAgnColumn) {
+    appendGroup(list, "Candidates", candidates, false);
+    return;
+  }
+  appendGroup(list, "Not in Likely AGN", candidates.filter(c => c.gaia_agn !== true), false);
+  appendGroup(list, "In Likely AGN", candidates.filter(c => c.gaia_agn === true), true);
+}
+
+/* Flat display order, so arrow keys follow what's on screen. */
+function orderedCandidates() {
+  if (!hasAgnColumn) return candidates;
+  return candidates.filter(c => c.gaia_agn !== true)
+    .concat(candidates.filter(c => c.gaia_agn === true));
+}
+
+/* --------------------------------------------------------------- viewers */
+
+function legacyUrl(ra, dec) {
+  const layer = document.getElementById("lsLayer").value;
+  const mark = encodeURIComponent(`${ra.toFixed(6)},${dec.toFixed(6)}`);
+  return `https://www.legacysurvey.org/viewer?ra=${ra.toFixed(6)}&dec=${dec.toFixed(6)}` +
+         `&mark=${mark}&zoom=${lsZoom}&layer=${layer}`;
+}
+
+function updateLegacyFrame() {
+  const c = candidates.find(x => x.oid === activeOid);
+  const frame = document.getElementById("legacyFrame");
+  const ph = document.getElementById("legacyPlaceholder");
+  const tb = document.getElementById("legacyToolbar");
+  document.getElementById("zoomLabel").textContent = "z" + lsZoom;
+
+  if (!c || c.ra === null || c.dec === null) {
+    frame.style.display = "none";
+    tb.style.display = "none";
+    ph.style.display = "flex";
+    ph.textContent = c ? "No RA/Dec in the CSV for this source." : "Legacy Survey cutout will load here.";
+    return;
+  }
+  const url = legacyUrl(c.ra, c.dec);
+  frame.src = url;
+  frame.style.display = "block";
+  ph.style.display = "none";
+  tb.style.display = "flex";
+  document.getElementById("legacyExternal").href = url;
+}
+
+function bumpZoom(d) {
+  lsZoom = Math.max(8, Math.min(18, lsZoom + d));
+  updateLegacyFrame();
+}
+
+function selectSource(oid) {
+  activeOid = oid;
+  const c = candidates.find(x => x.oid === oid);
+  if (!c) return;
+  renderSourceList();
+
+  const alerceUrl = `https://alerce.online/object/${oid}`;
+  const af = document.getElementById("alerceFrame");
+  af.src = alerceUrl;
+  af.style.display = "block";
+  document.getElementById("alercePlaceholder").style.display = "none";
+  document.getElementById("alerceToolbar").style.display = "flex";
+  document.getElementById("alerceExternal").href = alerceUrl;
+
+  updateLegacyFrame();
+
+  const coord = (c.ra !== null && c.dec !== null)
+    ? `  (RA ${c.ra.toFixed(5)}, Dec ${c.dec.toFixed(5)})` : "";
+  const agn = c.gaia_agn === true
+    ? `  \u2014 Gaia AGN: ${c.gaia_agn_grade || "match"}` +
+      (c.gaia_agn_prob !== null ? ` (p=${c.gaia_agn_prob.toFixed(2)})` : "") +
+      (c.gaia_agn_z !== null ? ` z_qsoc=${c.gaia_agn_z.toFixed(3)}` : "")
+    : "";
+  document.getElementById("currentSourceLabel").textContent = `${oid}${coord}${agn}`;
+
+  const btn = document.getElementById("keepBtn");
+  btn.disabled = false;
+  const isKept = kept.some(k => k.oid === oid);
+  btn.textContent = isKept ? "\u2713 Kept (click to remove)" : "Keep";
+  btn.classList.toggle("kept", isKept);
+}
+
+/* ------------------------------------------------------------ keep panel */
+
+function agnLabel(c) {
+  if (c.gaia_agn === true) return c.gaia_agn_grade === "likely" ? "likely" : "candidate";
+  if (c.gaia_agn === false) return "no";
+  return "unknown";
+}
+
+function toggleKeep() {
+  if (!activeOid) return;
+  const c = candidates.find(x => x.oid === activeOid);
+  const idx = kept.findIndex(k => k.oid === activeOid);
+  if (idx >= 0) {
+    kept.splice(idx, 1);
+  } else {
+    kept.push({
+      oid: c.oid, ra: c.ra, dec: c.dec,
+      gaia_agn: agnLabel(c),
+      host_spectrum: "None",
+      redshift: (c.gaia_agn_z !== null ? String(c.gaia_agn_z) : "")
+    });
+  }
+  renderKeepTable();
+  renderSourceList();
+  selectSource(activeOid);
+}
+
+function removeKept(oid) {
+  kept = kept.filter(k => k.oid !== oid);
+  renderKeepTable();
+  renderSourceList();
+  if (activeOid) selectSource(activeOid);
+}
+
+/* Rows are built with the DOM API and the inputs mutate `kept` in place, so
+   typing a redshift never triggers a re-render (which would steal focus). */
+function renderKeepTable() {
+  const tbody = document.getElementById("keepTbody");
+  const emptyMsg = document.getElementById("emptyKeep");
+  tbody.innerHTML = "";
+  if (kept.length === 0) { emptyMsg.style.display = "block"; return; }
+  emptyMsg.style.display = "none";
+
+  kept.forEach(k => {
+    const tr = document.createElement("tr");
+
+    const tdName = document.createElement("td");
+    tdName.className = "mono"; tdName.textContent = k.oid;
+
+    const tdRa = document.createElement("td");
+    tdRa.className = "mono"; tdRa.textContent = k.ra !== null ? k.ra.toFixed(5) : "\u2014";
+
+    const tdDec = document.createElement("td");
+    tdDec.className = "mono"; tdDec.textContent = k.dec !== null ? k.dec.toFixed(5) : "\u2014";
+
+    const tdAgn = document.createElement("td");
+    tdAgn.className = "mono"; tdAgn.textContent = k.gaia_agn;
+    if (k.gaia_agn === "likely") tdAgn.style.color = "var(--agn)";
+
+    const tdSpec = document.createElement("td");
+    const sel = document.createElement("select");
+    HOST_SPEC_OPTIONS.forEach(o => {
+      const opt = document.createElement("option");
+      opt.value = o; opt.textContent = o;
+      if (o === k.host_spectrum) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.onchange = e => { k.host_spectrum = e.target.value; };
+    tdSpec.appendChild(sel);
+
+    const tdZ = document.createElement("td");
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.className = "z"; inp.placeholder = "e.g. 0.075";
+    inp.inputMode = "decimal"; inp.value = k.redshift;
+    inp.oninput = e => { k.redshift = e.target.value; };
+    tdZ.appendChild(inp);
+
+    const tdRm = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.className = "remove-btn"; btn.textContent = "Remove";
+    btn.onclick = () => removeKept(k.oid);
+    tdRm.appendChild(btn);
+
+    [tdName, tdRa, tdDec, tdAgn, tdSpec, tdZ, tdRm].forEach(td => tr.appendChild(td));
+    tbody.appendChild(tr);
+  });
+}
+
+/* ---------------------------------------------------------------- export */
+
+function csvCell(v) {
+  const s = (v === null || v === undefined) ? "" : String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function exportKeepCsv() {
+  if (kept.length === 0) {
+    alert("No sources in the follow-up list yet.");
+    return;
+  }
+  const header = ["oid", "ra", "dec", "gaia_agn", "host_spectrum", "redshift"];
+  const lines = [header.join(",")];
+  kept.forEach(k => {
+    lines.push([
+      csvCell(k.oid),
+      csvCell(k.ra !== null ? k.ra.toFixed(6) : ""),
+      csvCell(k.dec !== null ? k.dec.toFixed(6) : ""),
+      csvCell(k.gaia_agn),
+      csvCell(k.host_spectrum),
+      csvCell(k.redshift.trim())
+    ].join(","));
+  });
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  const blob = new Blob([lines.join("\n") + "\n"], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `followup_targets_${stamp}.csv`;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  // Firefox cancels the download if the object URL is revoked synchronously.
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1500);
+}
+
+/* ------------------------------------------------------------- shortcuts */
+
+document.addEventListener("keydown", e => {
+  const t = e.target;
+  if (t && ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName)) return;
+  const list = orderedCandidates();
+  if (list.length === 0) return;
+  const i = list.findIndex(c => c.oid === activeOid);
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    selectSource(list[Math.min(list.length - 1, i + 1)].oid);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    selectSource(list[Math.max(0, i <= 0 ? 0 : i - 1)].oid);
+  } else if (e.key.toLowerCase() === "k" && activeOid) {
+    e.preventDefault();
+    toggleKeep();
+  }
+});
+
+/* ------------------------------------------------------------------ init */
+
+(function initFromQuery() {
+  const csvParam = new URLSearchParams(window.location.search).get("csv");
+  if (csvParam) document.getElementById("csvFilename").value = csvParam;
+})();
+
+renderKeepTable();
+loadFromServer();
+</script>
+
+</body>
+</html>
