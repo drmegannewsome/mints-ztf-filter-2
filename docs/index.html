@@ -16,7 +16,6 @@
     --go-hover: #3fb950;
     --warn: #d29922;
     --stop: #da3633;
-    --active: #1f4f8f;
     --serif: "Times New Roman", Times, "Liberation Serif", Georgia, serif;
   }
   * { box-sizing: border-box; font-family: var(--serif); }
@@ -30,24 +29,24 @@
     padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
     display: flex; align-items: baseline; gap: 14px; flex-shrink: 0; flex-wrap: wrap;
   }
-  header h1 { font-size: 21px; margin: 0; font-weight: 700; color: #fff; letter-spacing: 0.01em; }
+  header h1 { font-size: 21px; margin: 0; font-weight: 700; color: #fff; }
   header .sub { font-size: 15px; color: var(--muted); font-style: italic; }
   header .links { margin-left: auto; font-size: 14px; }
   header .links a { color: var(--accent); }
 
   .layout { flex: 1; display: flex; overflow: hidden; }
 
-  /* ---- filter controls ---- */
+  /* ---- filters ---- */
   .controls {
-    width: 330px; flex-shrink: 0; border-right: 1px solid var(--border);
+    width: 320px; flex-shrink: 0; border-right: 1px solid var(--border);
     background: var(--panel); overflow-y: auto; padding: 16px 18px 24px;
   }
   .controls h2 {
     font-size: 13px; text-transform: uppercase; letter-spacing: 0.07em;
-    color: var(--muted); margin: 0 0 4px 0; font-weight: 700;
+    color: var(--muted); margin: 0 0 6px 0; font-weight: 700;
   }
   .controls .lede {
-    font-size: 13.5px; color: var(--muted); line-height: 1.5; margin: 0 0 18px 0; font-style: italic;
+    font-size: 13.5px; color: var(--muted); line-height: 1.5; margin: 0 0 20px 0; font-style: italic;
   }
   .field { margin-bottom: 20px; }
   .field > label {
@@ -59,23 +58,14 @@
     display: none; font-size: 13px; color: var(--warn); margin-top: 5px; line-height: 1.4;
   }
   .field.unavailable .absent { display: block; }
-  .field.unavailable > label, .field.unavailable .help { opacity: 0.55; }
   input.num {
     width: 100%; background: #0d1117; border: 1px solid var(--border); color: var(--text);
     border-radius: 5px; padding: 7px 9px; font-size: 16px;
   }
   input.num:focus { outline: 1px solid var(--accent); }
-  input.num:disabled { opacity: 0.45; cursor: not-allowed; }
-  .presets { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
-  .preset {
-    background: transparent; color: var(--text); border: 1px solid var(--border);
-    border-radius: 5px; padding: 4px 12px; font-size: 14px; cursor: pointer;
-  }
-  .preset:hover:not(:disabled) { background: #21262d; }
-  .preset.on { background: var(--active); border-color: var(--accent); color: #fff; }
-  .preset:disabled { opacity: 0.4; cursor: not-allowed; }
-  .toggle { display: flex; gap: 8px; margin-top: 4px; }
-  .toggle .preset { flex: 1; }
+  .checkrow { display: flex; align-items: center; gap: 9px; margin-top: 4px; }
+  .checkrow input { width: 16px; height: 16px; accent-color: var(--go); cursor: pointer; }
+  .checkrow label { font-size: 15.5px; cursor: pointer; color: var(--text); }
   .runrow { display: flex; gap: 9px; margin-top: 6px; }
   .go-btn {
     flex: 1; background: var(--go); color: #fff; border: none; border-radius: 5px;
@@ -89,8 +79,7 @@
   .reset-btn:hover { background: #21262d; }
   .cmd {
     margin-top: 16px; padding: 9px 11px; background: #0d1117; border: 1px solid var(--border);
-    border-radius: 5px; font-size: 13px; color: var(--muted); line-height: 1.55;
-    word-break: break-word;
+    border-radius: 5px; font-size: 13px; color: var(--muted); line-height: 1.55; word-break: break-word;
   }
   .cmd b { color: var(--text); font-weight: 400; }
   .cmd .note { display: block; margin-top: 7px; font-style: italic; }
@@ -123,8 +112,7 @@
   }
   table.results th {
     position: sticky; top: 0; background: var(--panel); color: var(--muted);
-    font-weight: 700; font-size: 13px; letter-spacing: 0.03em; z-index: 1;
-    cursor: pointer; user-select: none;
+    font-weight: 700; font-size: 13px; z-index: 1; cursor: pointer; user-select: none;
   }
   table.results th:hover { color: var(--text); }
   table.results th .arrow { color: var(--accent); }
@@ -133,12 +121,11 @@
   table.results td.agn { color: var(--warn); }
   .placeholder {
     padding: 26px 20px; color: var(--muted); font-size: 15.5px; font-style: italic;
-    line-height: 1.6; max-width: 60ch;
+    line-height: 1.6; max-width: 62ch;
   }
   .banner {
     margin: 14px 18px; padding: 10px 13px; border-radius: 5px; font-size: 15px;
-    border: 1px solid var(--stop); color: #f0b0ae; background: rgba(218,54,51,0.09);
-    line-height: 1.5;
+    border: 1px solid var(--stop); color: #f0b0ae; background: rgba(218,54,51,0.09); line-height: 1.5;
   }
 </style>
 </head>
@@ -147,109 +134,84 @@
 <header>
   <h1>ZTF Nuclear Transient Candidates</h1>
   <span class="sub">blue &middot; non-stellar &middot; non-CV &middot; nuclear</span>
-  <span class="links">
-    <a id="reviewLink" href="candidate_gui.html?csv=candidates.csv" target="_blank">Review GUI &#8599;</a>
-  </span>
+  <span class="links"><a href="candidate_gui.html?csv=candidates.csv" target="_blank">Review GUI &#8599;</a></span>
 </header>
 
 <div class="layout">
 
-  <!-- --------------------------------------------------------- filters -->
   <div class="controls">
     <h2>Filters</h2>
     <p class="lede">
-      The scan runs on a schedule with generous cuts; these controls narrow the
-      published table in your browser. Nothing here re-queries ALeRCE, so
-      loosening a cut below what the scan itself used cannot recover objects
-      it never kept.
+      This page reads the candidate table produced by the most recent scheduled
+      scan and narrows it in your browser. It does not run the pipeline &mdash;
+      scans are launched from the repository's Actions tab.
     </p>
 
     <div class="field" id="field-days">
-      <label for="days">Discovery window</label>
+      <label for="days">Discovery window (days)</label>
       <span class="flag">--days</span>
       <input id="days" class="num" type="number" min="1" max="3650" step="1" value="90">
-      <div class="presets">
-        <button class="preset" data-target="days" data-value="14">14</button>
-        <button class="preset" data-target="days" data-value="30">30</button>
-        <button class="preset" data-target="days" data-value="60">60</button>
-        <button class="preset" data-target="days" data-value="90">90</button>
-      </div>
       <span class="help">Keep objects whose <i>first</i> detection falls within this
-      many days of now, from the <code>firstmjd</code> column.</span>
-      <span class="absent">No <code>firstmjd</code> column in this CSV &mdash; this
-      filter is inactive.</span>
+      many days of now.</span>
+      <span class="absent">The loaded table has no <code>firstmjd</code> column, so
+      this value is ignored.</span>
     </div>
 
     <div class="field" id="field-min_ndet">
       <label for="min_ndet">Minimum detections</label>
       <span class="flag">--min-ndet</span>
-      <input id="min_ndet" class="num" type="number" min="1" max="1000" step="1" value="5">
-      <div class="presets">
-        <button class="preset" data-target="min_ndet" data-value="3">3</button>
-        <button class="preset" data-target="min_ndet" data-value="5">5</button>
-        <button class="preset" data-target="min_ndet" data-value="10">10</button>
-        <button class="preset" data-target="min_ndet" data-value="20">20</button>
-      </div>
-      <span class="help">Total alert count. Higher is cleaner but biases against
-      the youngest transients.</span>
-      <span class="absent">No <code>ndet</code> column in this CSV &mdash; this
-      filter is inactive.</span>
+      <input id="min_ndet" class="num" type="number" min="1" max="100000" step="1" value="5">
+      <span class="help">Total alert count.</span>
+      <span class="absent">The loaded table has no <code>ndet</code> column, so this
+      value is ignored.</span>
     </div>
 
     <div class="field" id="field-sigma_max">
-      <label for="sigma_max">Nuclear tolerance</label>
+      <label for="sigma_max">Nuclear tolerance (&sigma;)</label>
       <span class="flag">--sigma-max</span>
       <input id="sigma_max" class="num" type="number" min="0.01" max="100" step="0.1" value="1.0">
-      <div class="presets">
-        <button class="preset" data-target="sigma_max" data-value="0.5">0.5</button>
-        <button class="preset" data-target="sigma_max" data-value="1">1.0</button>
-        <button class="preset" data-target="sigma_max" data-value="1.5">1.5</button>
-        <button class="preset" data-target="sigma_max" data-value="2">2.0</button>
-      </div>
-      <span class="help">Maximum offset from the host centre, in &sigma;, from the
+      <span class="help">Maximum offset from the host centre from the
       <i>iinuclear</i> test.</span>
-      <span class="absent">No <code>nuclear_sigma</code> column in this CSV &mdash;
-      this filter is inactive.</span>
+      <span class="absent">The loaded table has no <code>nuclear_sigma</code> column,
+      so this value is ignored.</span>
     </div>
 
     <div class="field" id="field-rising">
-      <label>Require rising</label>
+      <label>Light-curve trend</label>
       <span class="flag">--rising</span>
-      <div class="toggle">
-        <button class="preset on" id="risingOff" onclick="setRising(false)">Off</button>
-        <button class="preset" id="risingOn" onclick="setRising(true)">On</button>
+      <div class="checkrow">
+        <input type="checkbox" id="rising">
+        <label for="rising">Require rising</label>
       </div>
       <span class="help">Latest g/r epoch brighter than the weighted mean of the
       prior two.</span>
-      <span class="absent">No <code>is_rising</code> column in this CSV &mdash; this
-      filter is inactive.</span>
+      <span class="absent">The loaded table has no <code>is_rising</code> column, so
+      this is ignored.</span>
     </div>
 
     <div class="runrow">
-      <button class="go-btn" onclick="applyFilters()">Apply filters</button>
-      <button class="reset-btn" onclick="resetFilters()">Reset</button>
+      <button class="go-btn" id="applyBtn">Apply filters</button>
+      <button class="reset-btn" id="resetBtn">Reset</button>
     </div>
 
     <div class="cmd" id="cmdPreview"></div>
   </div>
 
-  <!-- --------------------------------------------------------- results -->
   <div class="output">
     <div class="status-bar">
       <span class="dot loading" id="dot"></span>
-      <span id="statusText">Loading candidates&hellip;</span>
+      <span id="statusText">Loading candidate table&hellip;</span>
       <span class="count" id="countText"></span>
       <span class="spacer"></span>
-      <a class="review" href="candidate_gui.html?csv=candidates.csv" target="_blank">
-        Open in review GUI &#8599;</a>
-      <button id="copyBtn" onclick="copyCsv()" disabled>Copy CSV</button>
-      <button id="saveBtn" onclick="downloadCsv()" disabled>Save CSV</button>
+      <button id="reloadBtn">Reload data</button>
+      <button id="copyBtn" disabled>Copy CSV</button>
+      <button id="saveBtn" disabled>Save CSV</button>
     </div>
 
     <div id="errorSlot"></div>
 
     <div class="table-wrap" id="tableWrap">
-      <div class="placeholder" id="placeholder">Loading <code>candidates.csv</code>&hellip;</div>
+      <div class="placeholder" id="placeholder">Loading&hellip;</div>
     </div>
   </div>
 
@@ -258,25 +220,27 @@
 <script>
 "use strict";
 
-const DEFAULTS = { days: 90, min_ndet: 5, sigma_max: 1.0, rising: false };
-const CSV_FILE = "candidates.csv";
-const STAMP_FILE = "last_run.txt";
+var DEFAULTS = { days: 90, min_ndet: 5, sigma_max: 1.0, rising: false };
+var CSV_FILE = "candidates.csv";
+var STAMP_FILE = "last_run.txt";
 
-let allRows = [];        /* array of {header: value} */
-let headers = [];
-let available = {};      /* which filter columns exist in the CSV */
-let shownCsv = null;
-let rising = false;
-let sortCol = null;
-let sortDesc = false;
+var allRows = [];
+var headers = [];
+var available = { days: false, min_ndet: false, sigma_max: false, rising: false };
+var loaded = false;
+var shownCsv = null;
+var lastKeep = [];
+var sortCol = null;
+var sortDesc = false;
+
+function $(id) { return document.getElementById(id); }
 
 /* ---------------------------------------------------------------- helpers */
 
 function splitCsvLine(line) {
-  const cells = [];
-  let cur = "", inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
+  var cells = [], cur = "", inQ = false, i, ch;
+  for (i = 0; i < line.length; i++) {
+    ch = line[i];
     if (inQ) {
       if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
       else if (ch === '"') { inQ = false; }
@@ -286,19 +250,19 @@ function splitCsvLine(line) {
     else { cur += ch; }
   }
   cells.push(cur);
-  return cells.map(c => c.trim());
+  return cells.map(function (c) { return c.trim(); });
 }
 
 function csvCell(v) {
-  const s = (v === null || v === undefined) ? "" : String(v);
+  var s = (v === null || v === undefined) ? "" : String(v);
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
 function fmt(v) {
   if (v === undefined || v === null || v === "") return "\u2014";
-  const t = String(v).trim();
+  var t = String(v).trim();
   if (/^-?\d*\.?\d+(e[-+]?\d+)?$/i.test(t)) {
-    const f = Number(t);
+    var f = Number(t);
     if (Number.isInteger(f)) return String(f);
     if (Math.abs(f) !== 0 && (Math.abs(f) >= 1e6 || Math.abs(f) < 1e-4)) return f.toExponential(3);
     return f.toFixed(5).replace(/0+$/, "").replace(/\.$/, "");
@@ -306,240 +270,295 @@ function fmt(v) {
   return t;
 }
 
-function nowMjd() {
-  return Date.now() / 86400000 + 40587;   /* Unix epoch = MJD 40587 */
-}
+function nowMjd() { return Date.now() / 86400000 + 40587; }   /* Unix epoch = MJD 40587 */
 
-function isTrue(v) {
-  return String(v).trim().toLowerCase() === "true";
-}
+function isTrue(v) { return String(v).trim().toLowerCase() === "true"; }
 
-function showError(msg) {
-  document.getElementById("errorSlot").innerHTML = msg ? `<div class="banner">${msg}</div>` : "";
+function showError(html) {
+  $("errorSlot").innerHTML = html ? '<div class="banner">' + html + '</div>' : "";
 }
 
 function setStatus(state, text) {
-  document.getElementById("dot").className = "dot " + (state || "");
-  document.getElementById("statusText").textContent = text;
+  $("dot").className = "dot " + (state || "");
+  $("statusText").textContent = text;
+}
+
+function setPlaceholder(text) {
+  var wrap = $("tableWrap");
+  wrap.innerHTML = "";
+  var d = document.createElement("div");
+  d.className = "placeholder";
+  d.textContent = text;
+  wrap.appendChild(d);
 }
 
 /* --------------------------------------------------------------- controls */
 
-document.querySelectorAll(".preset[data-target]").forEach(b => {
-  b.onclick = () => {
-    document.getElementById(b.dataset.target).value = b.dataset.value;
-    syncPresets();
-    updateCmdPreview();
-    applyFilters();
-  };
-});
-
-["days", "min_ndet", "sigma_max"].forEach(id => {
-  document.getElementById(id).addEventListener("input", () => {
-    syncPresets();
-    updateCmdPreview();
-    applyFilters();
-  });
-});
-
-function syncPresets() {
-  document.querySelectorAll(".preset[data-target]").forEach(b => {
-    const cur = parseFloat(document.getElementById(b.dataset.target).value);
-    b.classList.toggle("on", Math.abs(cur - parseFloat(b.dataset.value)) < 1e-9);
-  });
-}
-
-function setRising(v) {
-  rising = v;
-  document.getElementById("risingOn").classList.toggle("on", v);
-  document.getElementById("risingOff").classList.toggle("on", !v);
-  updateCmdPreview();
-  applyFilters();
-}
-
-function resetFilters() {
-  document.getElementById("days").value = DEFAULTS.days;
-  document.getElementById("min_ndet").value = DEFAULTS.min_ndet;
-  document.getElementById("sigma_max").value = DEFAULTS.sigma_max;
-  syncPresets();
-  setRising(DEFAULTS.rising);   /* triggers updateCmdPreview + applyFilters */
-}
-
 function readParams() {
-  const days = parseFloat(document.getElementById("days").value);
-  const minNdet = parseInt(document.getElementById("min_ndet").value, 10);
-  const sigmaMax = parseFloat(document.getElementById("sigma_max").value);
+  var days = parseFloat($("days").value);
+  var minNdet = parseInt($("min_ndet").value, 10);
+  var sigmaMax = parseFloat($("sigma_max").value);
   return {
-    days: isFinite(days) ? days : DEFAULTS.days,
-    min_ndet: Number.isInteger(minNdet) ? minNdet : DEFAULTS.min_ndet,
-    sigma_max: isFinite(sigmaMax) ? sigmaMax : DEFAULTS.sigma_max,
-    rising: rising
+    days: isFinite(days) && days > 0 ? days : DEFAULTS.days,
+    min_ndet: isFinite(minNdet) && minNdet > 0 ? minNdet : DEFAULTS.min_ndet,
+    sigma_max: isFinite(sigmaMax) && sigmaMax > 0 ? sigmaMax : DEFAULTS.sigma_max,
+    rising: $("rising").checked
   };
 }
 
 function updateCmdPreview() {
-  const p = readParams();
-  const parts = [
-    "ztf_filter_6000.py",
-    `--days ${p.days}`,
-    `--min-ndet ${p.min_ndet}`,
-    `--sigma-max ${p.sigma_max}`,
-    p.rising ? "--rising" : null,
-    "--out candidates.csv"
-  ].filter(Boolean);
-  document.getElementById("cmdPreview").innerHTML =
+  var p = readParams();
+  var parts = ["ztf_filter_6000.py",
+               "--days " + p.days,
+               "--min-ndet " + p.min_ndet,
+               "--sigma-max " + p.sigma_max];
+  if (p.rising) parts.push("--rising");
+  parts.push("--out candidates.csv");
+  $("cmdPreview").innerHTML =
     "to reproduce this selection locally<br><b>python " + parts.join(" ") + "</b>" +
     '<span class="note">Running it yourself re-queries ALeRCE and will pick up ' +
     'anything discovered since the last scheduled scan.</span>';
 }
 
+function resetFilters() {
+  $("days").value = DEFAULTS.days;
+  $("min_ndet").value = DEFAULTS.min_ndet;
+  $("sigma_max").value = DEFAULTS.sigma_max;
+  $("rising").checked = DEFAULTS.rising;
+  updateCmdPreview();
+}
+
 /* ------------------------------------------------------------ data loading */
 
+/* Flags which filters can actually bite, but never disables a control -- a
+   dead-looking button is far more confusing than one that says why it did
+   nothing. */
 function markAvailability() {
   available = {
-    days: headers.includes("firstmjd"),
-    min_ndet: headers.includes("ndet"),
-    sigma_max: headers.includes("nuclear_sigma"),
-    rising: headers.includes("is_rising")
+    days: headers.indexOf("firstmjd") !== -1,
+    min_ndet: headers.indexOf("ndet") !== -1,
+    sigma_max: headers.indexOf("nuclear_sigma") !== -1,
+    rising: headers.indexOf("is_rising") !== -1
   };
-  Object.keys(available).forEach(key => {
-    const field = document.getElementById("field-" + key);
-    if (!field) return;
-    field.classList.toggle("unavailable", !available[key]);
-    field.querySelectorAll("input, .preset").forEach(el => { el.disabled = !available[key]; });
+  ["days", "min_ndet", "sigma_max", "rising"].forEach(function (key) {
+    var field = $("field-" + key);
+    if (field) field.classList.toggle("unavailable", !available[key]);
   });
 }
 
-async function loadCandidates() {
-  let text;
-  try {
-    const r = await fetch(CSV_FILE, { cache: "no-store" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    text = await r.text();
-  } catch (err) {
-    setStatus("error", "Could not load candidates");
-    showError(`Could not load <code>${CSV_FILE}</code> (${err.message}). If the ` +
-              `scheduled scan has not run yet, the file may not exist in this ` +
-              `repository. Check the Actions tab.`);
-    document.getElementById("tableWrap").innerHTML =
-      '<div class="placeholder">Nothing to show.</div>';
-    return;
-  }
+function loadCandidates() {
+  loaded = false;
+  shownCsv = null;
+  lastKeep = [];
+  $("saveBtn").disabled = true;
+  $("copyBtn").disabled = true;
+  showError("");
+  setStatus("loading", "Loading candidate table\u2026");
+  setPlaceholder("Loading\u2026");
 
-  const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
-  if (lines.length < 1) {
-    setStatus("error", "Empty candidate file");
-    showError(`<code>${CSV_FILE}</code> is empty.`);
-    return;
-  }
+  /* Cache-bust: the Pages CDN will otherwise happily serve a stale CSV for
+     minutes after a scan commits a new one. */
+  fetch(CSV_FILE + "?t=" + Date.now(), { cache: "no-store" })
+    .then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.text();
+    })
+    .then(function (text) {
+      var lines = text.trim().split(/\r?\n/).filter(function (l) { return l.trim(); });
+      if (lines.length < 1) throw new Error("file is empty");
 
-  headers = splitCsvLine(lines[0]);
-  allRows = lines.slice(1).map(l => {
-    const cells = splitCsvLine(l), o = {};
-    headers.forEach((h, i) => { o[h] = cells[i]; });
-    return o;
-  });
-  markAvailability();
+      headers = splitCsvLine(lines[0]);
+      allRows = lines.slice(1).map(function (l) {
+        var cells = splitCsvLine(l), o = {};
+        headers.forEach(function (h, i) { o[h] = cells[i]; });
+        return o;
+      });
+      markAvailability();
+      loaded = true;
 
-  let stamp = "";
-  try {
-    const t = await fetch(STAMP_FILE, { cache: "no-store" });
-    if (t.ok) stamp = (await t.text()).trim();
-  } catch (err) { /* stamp is optional */ }
-  setStatus("ok", stamp ? "Last scan: " + stamp : "Candidates loaded");
-
-  applyFilters();
+      return fetch(STAMP_FILE + "?t=" + Date.now(), { cache: "no-store" })
+        .then(function (t) { return t.ok ? t.text() : ""; })
+        .catch(function () { return ""; });
+    })
+    .then(function (stamp) {
+      stamp = (stamp || "").trim();
+      setStatus("ok", stamp ? "Last scan: " + stamp : "Candidate table loaded");
+      $("countText").textContent =
+        allRows.length + " candidate" + (allRows.length === 1 ? "" : "s") + " available";
+      setPlaceholder("Loaded " + allRows.length + " candidate" +
+        (allRows.length === 1 ? "" : "s") + ". Set your filter values at left, then " +
+        "press \u201CApply filters\u201D to build the table.");
+    })
+    .catch(function (err) {
+      setStatus("error", "No candidate table");
+      $("countText").textContent = "";
+      showError("Could not load <code>" + CSV_FILE + "</code> (" + err.message +
+        "). This file is written by the <b>ZTF scan</b> workflow; if that has not " +
+        "run yet, go to the repository's Actions tab, choose <b>ZTF scan</b>, and " +
+        "press <b>Run workflow</b>.");
+      setPlaceholder("Nothing to show yet.");
+    });
 }
 
 /* --------------------------------------------------------------- filtering */
 
 function applyFilters() {
-  if (!headers.length) return;
-  const p = readParams();
-  const mjdCut = nowMjd() - p.days;
+  if (!loaded) {
+    showError("No candidate table is loaded, so there is nothing to filter yet. " +
+      "Press <b>Reload data</b> once the <b>ZTF scan</b> workflow has committed a " +
+      "<code>candidates.csv</code>.");
+    return;
+  }
+  showError("");
+  var p = readParams();
+  var mjdCut = nowMjd() - p.days;
 
-  const keep = allRows.filter(r => {
+  lastKeep = allRows.filter(function (r) {
+    var sig, fm, nd;
     if (available.sigma_max) {
-      const sig = parseFloat(r.nuclear_sigma);
+      sig = parseFloat(r.nuclear_sigma);
       if (isFinite(sig) && sig > p.sigma_max) return false;
     }
     if (available.days) {
-      const fm = parseFloat(r.firstmjd);
+      fm = parseFloat(r.firstmjd);
       if (isFinite(fm) && fm < mjdCut) return false;
     }
     if (available.min_ndet) {
-      const nd = parseFloat(r.ndet);
+      nd = parseFloat(r.ndet);
       if (isFinite(nd) && nd < p.min_ndet) return false;
     }
     if (available.rising && p.rising && !isTrue(r.is_rising)) return false;
     return true;
   });
 
-  if (sortCol !== null && headers.includes(sortCol)) {
-    keep.sort((a, b) => {
-      const av = a[sortCol], bv = b[sortCol];
-      const af = parseFloat(av), bf = parseFloat(bv);
-      let c;
+  renderCurrent();
+}
+
+function renderCurrent() {
+  var rows = lastKeep.slice();
+
+  if (sortCol !== null && headers.indexOf(sortCol) !== -1) {
+    rows.sort(function (a, b) {
+      var av = a[sortCol], bv = b[sortCol];
+      var af = parseFloat(av), bf = parseFloat(bv), c;
       if (isFinite(af) && isFinite(bf)) c = af - bf;
       else c = String(av || "").localeCompare(String(bv || ""));
       return sortDesc ? -c : c;
     });
   }
 
-  shownCsv = [headers.join(",")]
-    .concat(keep.map(r => headers.map(h => csvCell(r[h])).join(",")))
-    .join("\n") + "\n";
+  shownCsv = [headers.join(",")].concat(rows.map(function (r) {
+    return headers.map(function (h) { return csvCell(r[h]); }).join(",");
+  })).join("\n") + "\n";
 
-  renderTable(headers, keep);
-  document.getElementById("countText").textContent =
-    `${keep.length} of ${allRows.length} candidate${allRows.length === 1 ? "" : "s"} shown`;
-  document.getElementById("saveBtn").disabled = keep.length === 0;
-  document.getElementById("copyBtn").disabled = keep.length === 0;
+  renderTable(headers, rows);
+  $("countText").textContent =
+    rows.length + " of " + allRows.length + " candidate" +
+    (allRows.length === 1 ? "" : "s") + " shown";
+  $("saveBtn").disabled = rows.length === 0;
+  $("copyBtn").disabled = rows.length === 0;
+  updateCmdPreview();
 }
 
 /* ----------------------------------------------------------------- table */
 
 function renderTable(cols, rows) {
-  const wrap = document.getElementById("tableWrap");
+  var wrap = $("tableWrap");
   if (rows.length === 0) {
-    wrap.innerHTML = '<div class="placeholder">No candidates pass these filters. ' +
-      'Try widening the discovery window, lowering the minimum detection count, ' +
-      'or loosening the nuclear tolerance.</div>';
+    setPlaceholder("No candidates pass these filters. Try widening the discovery " +
+      "window, lowering the minimum detection count, or loosening the nuclear " +
+      "tolerance.");
     return;
   }
 
-  const table = document.createElement("table");
+  var table = document.createElement("table");
   table.className = "results";
 
-  const thead = document.createElement("thead");
-  const hr = document.createElement("tr");
-  cols.forEach(h => {
-    const th = document.createElement("th");
+  var thead = document.createElement("thead");
+  var hr = document.createElement("tr");
+  cols.forEach(function (h) {
+    var th = document.createElement("th");
     th.textContent = h;
     if (h === sortCol) {
-      const a = document.createElement("span");
+      var a = document.createElement("span");
       a.className = "arrow";
       a.textContent = sortDesc ? "  \u25BC" : "  \u25B2";
       th.appendChild(a);
     }
-    th.onclick = () => {
-      if (sortCol === h) sortDesc = !sortDesc;
+    th.addEventListener("click", function () {
+      if (sortCol === h) { sortDesc = !sortDesc; }
       else { sortCol = h; sortDesc = false; }
-      applyFilters();
-    };
+      renderCurrent();
+    });
     hr.appendChild(th);
   });
   thead.appendChild(hr);
   table.appendChild(thead);
 
-  const tbody = document.createElement("tbody");
-  rows.forEach(r => {
-    const tr = document.createElement("tr");
-    cols.forEach(h => {
-      const td = document.createElement("td");
+  var tbody = document.createElement("tbody");
+  rows.forEach(function (r) {
+    var tr = document.createElement("tr");
+    cols.forEach(function (h) {
+      var td = document.createElement("td");
       td.textContent = fmt(r[h]);
       if (isTrue(r[h])) td.className = (h === "gaia_agn") ? "agn" : "true";
       tr.appendChild(td);
     });
     tbody.appendChild(tr);
   });
+  table.appendChild(tbody);
+
+  wrap.innerHTML = "";
+  wrap.appendChild(table);
+}
+
+/* ---------------------------------------------------------------- saving */
+
+function downloadCsv() {
+  if (!shownCsv) return;
+  var blob = new Blob([shownCsv], { type: "text/csv;charset=utf-8;" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "candidates_filtered.csv";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  /* Firefox cancels the download if the object URL is revoked synchronously. */
+  setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1500);
+}
+
+function copyCsv() {
+  if (!shownCsv) return;
+  var btn = $("copyBtn");
+  var done = function (msg) {
+    btn.textContent = msg;
+    setTimeout(function () { btn.textContent = "Copy CSV"; }, 1600);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(shownCsv)
+      .then(function () { done("Copied"); })
+      .catch(function () { done("Copy failed"); });
+  } else {
+    done("Copy failed");
+  }
+}
+
+/* ------------------------------------------------------------------ init */
+
+["days", "min_ndet", "sigma_max"].forEach(function (id) {
+  $(id).addEventListener("input", updateCmdPreview);
+});
+$("rising").addEventListener("change", updateCmdPreview);
+$("applyBtn").addEventListener("click", applyFilters);
+$("resetBtn").addEventListener("click", resetFilters);
+$("reloadBtn").addEventListener("click", loadCandidates);
+$("saveBtn").addEventListener("click", downloadCsv);
+$("copyBtn").addEventListener("click", copyCsv);
+
+resetFilters();
+loadCandidates();
+</script>
+
+</body>
+</html>
