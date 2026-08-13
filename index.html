@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ZTF Filter — Run Control</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #d6d3cd;
+    --muted: #8b8681;
+    --accent: #9dc1e8;
+    --go: #2ea043;
+    --go-hover: #3fb950;
+    --stop: #da3633;
+    --active: #1f4f8f;
+    --serif: "Times New Roman", Times, "Liberation Serif", Georgia, serif;
+  }
+  * { box-sizing: border-box; font-family: var(--serif); }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+    font-size: 16px; font-variant-numeric: tabular-nums;
+  }
+  header {
+    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex; align-items: baseline; gap: 14px; flex-shrink: 0;
+  }
+  header h1 { font-size: 21px; margin: 0; font-weight: 700; color: #fff; letter-spacing: 0.01em; }
+  header .sub { font-size: 15px; color: var(--muted); font-style: italic; }
+  header .links { margin-left: auto; font-size: 14px; }
+  header .links a { color: var(--accent); }
+
+  .layout { flex: 1; display: flex; overflow: hidden; }
+
+  /* ---- controls ---- */
+  .controls {
+    width: 330px; flex-shrink: 0; border-right: 1px solid var(--border);
+    background: var(--panel); overflow-y: auto; padding: 16px 18px 24px;
+  }
+  .field { margin-bottom: 20px; }
+  .field > label {
+    display: block; font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 2px;
+  }
+  .field .flag { display: block; font-size: 13px; color: var(--muted); font-style: italic; margin-bottom: 7px; }
+  .field .help { display: block; font-size: 13px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+  input.num, input.txt {
+    width: 100%; background: #0d1117; border: 1px solid var(--border); color: var(--text);
+    border-radius: 5px; padding: 7px 9px; font-size: 16px;
+  }
+  input.num:focus, input.txt:focus { outline: 1px solid var(--accent); }
+  .presets { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+  .preset {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+    border-radius: 5px; padding: 4px 12px; font-size: 14px; cursor: pointer;
+  }
+  .preset:hover { background: #21262d; }
+  .preset.on { background: var(--active); border-color: var(--accent); color: #fff; }
+  .toggle {
+    display: flex; gap: 8px; margin-top: 4px;
+  }
+  .toggle .preset { flex: 1; }
+  .runrow { display: flex; gap: 9px; margin-top: 6px; }
+  .go-btn {
+    flex: 1; background: var(--go); color: #fff; border: none; border-radius: 5px;
+    padding: 10px 14px; font-size: 17px; font-weight: 700; cursor: pointer;
+  }
+  .go-btn:hover:not(:disabled) { background: var(--go-hover); }
+  .go-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .stop-btn {
+    background: transparent; color: var(--stop); border: 1px solid var(--stop);
+    border-radius: 5px; padding: 10px 14px; font-size: 16px; cursor: pointer;
+  }
+  .stop-btn:hover:not(:disabled) { background: var(--stop); color: #fff; }
+  .stop-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .cmd {
+    margin-top: 14px; padding: 9px 11px; background: #0d1117; border: 1px solid var(--border);
+    border-radius: 5px; font-size: 13px; color: var(--muted); line-height: 1.5;
+    word-break: break-word;
+  }
+  .cmd b { color: var(--text); font-weight: 400; }
+
+  /* ---- output ---- */
+  .output { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+  .status-bar {
+    padding: 9px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex; align-items: center; gap: 14px; flex-shrink: 0; font-size: 15px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #484f58; flex-shrink: 0; }
+  .dot.running { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
+  .dot.done { background: var(--go); }
+  .dot.error, .dot.cancelled { background: var(--stop); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  .status-bar .spacer { margin-left: auto; }
+  .status-bar button {
+    background: transparent; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 12px; font-size: 14px; cursor: pointer;
+  }
+  .status-bar button:hover:not(:disabled) { background: #21262d; }
+  .status-bar button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .status-bar a.review { color: var(--accent); font-size: 14px; }
+
+  .log-wrap {
+    flex: 0 0 34%; overflow-y: auto; padding: 12px 18px;
+    border-bottom: 1px solid var(--border); background: #0a0e14;
+  }
+  pre#log {
+    margin: 0; font-family: var(--serif); font-size: 14.5px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word; color: var(--text);
+  }
+  pre#log .cmdline { color: var(--muted); font-style: italic; }
+  pre#log .stage { color: #fff; font-weight: 700; }
+
+  .table-wrap { flex: 1; overflow: auto; }
+  table.results { border-collapse: collapse; font-size: 14.5px; white-space: nowrap; }
+  table.results th, table.results td {
+    padding: 6px 13px; text-align: left; border-bottom: 1px solid var(--border);
+  }
+  table.results th {
+    position: sticky; top: 0; background: var(--panel); color: var(--muted);
+    font-weight: 700; font-size: 13px; letter-spacing: 0.03em; z-index: 1;
+  }
+  table.results tr:hover td { background: #1c2128; }
+  table.results td.true { color: var(--go-hover); }
+  table.results td.agn { color: #d29922; }
+  .placeholder {
+    padding: 26px 20px; color: var(--muted); font-size: 15.5px; font-style: italic; line-height: 1.6;
+  }
+  .banner {
+    margin: 14px 18px; padding: 10px 13px; border-radius: 5px; font-size: 15px;
+    border: 1px solid var(--stop); color: #f0b0ae; background: rgba(218,54,51,0.09);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ZTF Filter &mdash; Run Control</h1>
+  <span class="sub">blue &middot; non-stellar &middot; non-CV &middot; nuclear</span>
+  <span class="links"><a href="candidate_gui.html" target="_blank">Review GUI &#8599;</a></span>
+</header>
+
+<div class="layout">
+
+  <!-- ------------------------------------------------------- controls -->
+  <div class="controls">
+
+    <div class="field">
+      <label for="days">Discovery window</label>
+      <span class="flag">--days</span>
+      <input id="days" class="num" type="number" min="1" max="3650" step="1" value="90">
+      <div class="presets">
+        <button class="preset" data-target="days" data-value="14">14</button>
+        <button class="preset" data-target="days" data-value="30">30</button>
+        <button class="preset" data-target="days" data-value="60">60</button>
+        <button class="preset" data-target="days" data-value="90">90</button>
+      </div>
+      <span class="help">Keep objects whose <i>first</i> detection falls within this
+      many days of now.</span>
+    </div>
+
+    <div class="field">
+      <label for="min_ndet">Minimum detections</label>
+      <span class="flag">--min-ndet</span>
+      <input id="min_ndet" class="num" type="number" min="1" max="1000" step="1" value="5">
+      <div class="presets">
+        <button class="preset" data-target="min_ndet" data-value="3">3</button>
+        <button class="preset" data-target="min_ndet" data-value="5">5</button>
+        <button class="preset" data-target="min_ndet" data-value="10">10</button>
+        <button class="preset" data-target="min_ndet" data-value="20">20</button>
+      </div>
+      <span class="help">Coarse Stage-1 cut on total alert count. Lower reaches
+      younger transients but returns far more objects to screen.</span>
+    </div>
+
+    <div class="field">
+      <label for="sigma_max">Nuclear tolerance</label>
+      <span class="flag">--sigma-max</span>
+      <input id="sigma_max" class="num" type="number" min="0.01" max="100" step="0.1" value="1.0">
+      <div class="presets">
+        <button class="preset" data-target="sigma_max" data-value="0.5">0.5</button>
+        <button class="preset" data-target="sigma_max" data-value="1">1.0</button>
+        <button class="preset" data-target="sigma_max" data-value="1.5">1.5</button>
+        <button class="preset" data-target="sigma_max" data-value="2">2.0</button>
+      </div>
+      <span class="help">Maximum offset from the host centre, in &sigma;, from the
+      <i>iinuclear</i> test.</span>
+    </div>
+
+    <div class="field">
+      <label>Require rising</label>
+      <span class="flag">--rising</span>
+      <div class="toggle">
+        <button class="preset on" id="risingOff" onclick="setRising(false)">Off</button>
+        <button class="preset" id="risingOn" onclick="setRising(true)">On</button>
+      </div>
+      <span class="help">Also require the latest g/r epoch to be brighter than the
+      weighted mean of the prior two.</span>
+    </div>
+
+    <div class="field">
+      <label for="out">Output file</label>
+      <span class="flag">--out</span>
+      <input id="out" class="txt" type="text" value="candidates.csv">
+      <span class="help">Written next to the pipeline, so the review GUI can load it
+      straight away.</span>
+    </div>
+
+    <div class="runrow">
+      <button class="go-btn" id="runBtn" onclick="startRun()">Run scan</button>
+      <button class="stop-btn" id="stopBtn" onclick="stopRun()" disabled>Stop</button>
+    </div>
+
+    <div class="cmd" id="cmdPreview"></div>
+  </div>
+
+  <!-- --------------------------------------------------------- output -->
+  <div class="output">
+    <div class="status-bar">
+      <span class="dot" id="dot"></span>
+      <span id="statusText">Idle</span>
+      <span id="elapsed" style="color:var(--muted);"></span>
+      <span class="spacer"></span>
+      <a class="review" id="reviewLink" href="candidate_gui.html" target="_blank" style="display:none;">
+        Open in review GUI &#8599;</a>
+      <button id="copyBtn" onclick="copyCsv()" disabled>Copy CSV</button>
+      <button id="saveBtn" onclick="downloadCsv()" disabled>Save CSV</button>
+    </div>
+
+    <div id="errorSlot"></div>
+
+    <div class="log-wrap" id="logWrap">
+      <pre id="log"></pre>
+    </div>
+
+    <div class="table-wrap" id="tableWrap">
+      <div class="placeholder" id="placeholder">
+        Set the options at left and press &ldquo;Run scan&rdquo;. Stage progress appears
+        above; the candidate table appears here when the scan finishes.
+        <br><br>
+        A full 90-day scan queries ALeRCE, Gaia and PanSTARRS for every surviving
+        object and can take a while &mdash; the log updates as each stage completes.
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+
+let since = 0;
+let pollTimer = null;
+let lastCsv = null;
+let lastCsvName = "candidates.csv";
+let rising = false;
+
+/* ------------------------------------------------------------- controls */
+
+document.querySelectorAll(".preset[data-target]").forEach(b => {
+  b.onclick = () => {
+    document.getElementById(b.dataset.target).value = b.dataset.value;
+    syncPresets();
+    updateCmdPreview();
+  };
+});
+["days", "min_ndet", "sigma_max", "out"].forEach(id => {
+  document.getElementById(id).addEventListener("input", () => { syncPresets(); updateCmdPreview(); });
+});
+
+function syncPresets() {
+  document.querySelectorAll(".preset[data-target]").forEach(b => {
+    const cur = parseFloat(document.getElementById(b.dataset.target).value);
+    b.classList.toggle("on", Math.abs(cur - parseFloat(b.dataset.value)) < 1e-9);
+  });
+}
+
+function setRising(v) {
+  rising = v;
+  document.getElementById("risingOn").classList.toggle("on", v);
+  document.getElementById("risingOff").classList.toggle("on", !v);
+  updateCmdPreview();
+}
+
+function readParams() {
+  return {
+    days: parseFloat(document.getElementById("days").value),
+    min_ndet: parseInt(document.getElementById("min_ndet").value, 10),
+    sigma_max: parseFloat(document.getElementById("sigma_max").value),
+    rising: rising,
+    out: document.getElementById("out").value.trim() || "candidates.csv"
+  };
+}
+
+function updateCmdPreview() {
+  const p = readParams();
+  const parts = [
+    "ztf_filter_6000.py",
+    `--days ${p.days}`,
+    `--min-ndet ${p.min_ndet}`,
+    `--sigma-max ${p.sigma_max}`,
+    p.rising ? "--rising" : null,
+    `--out ${p.out}`
+  ].filter(Boolean);
+  document.getElementById("cmdPreview").innerHTML =
+    "equivalent to<br><b>python " + parts.join(" ") + "</b>";
+}
+
+/* ------------------------------------------------------------------ run */
+
+function setBusy(busy) {
+  document.getElementById("runBtn").disabled = busy;
+  document.getElementById("stopBtn").disabled = !busy;
+  document.querySelectorAll(".controls input, .controls .preset")
+    .forEach(el => { el.disabled = busy; });
+}
+
+function setStatus(state, text, elapsed) {
+  const dot = document.getElementById("dot");
+  dot.className = "dot " + (state || "");
+  document.getElementById("statusText").textContent = text;
+  document.getElementById("elapsed").textContent =
+    (elapsed !== undefined && elapsed !== null) ? `(${elapsed.toFixed(1)} s)` : "";
+}
+
+function showError(msg) {
+  document.getElementById("errorSlot").innerHTML =
+    msg ? `<div class="banner">${msg}</div>` : "";
+}
+
+async function startRun() {
+  const p = readParams();
+  if (!isFinite(p.days) || !isFinite(p.sigma_max) || !Number.isInteger(p.min_ndet)) {
+    showError("Please enter valid numeric values for all three numeric options.");
+    return;
+  }
+  showError("");
+  let resp, data;
+  try {
+    resp = await fetch("/api/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(p)
+    });
+    data = await resp.json();
+  } catch (err) {
+    showError("Could not reach the run server: " + err.message);
+    return;
+  }
+  if (!resp.ok) { showError(data.error || "Run rejected."); return; }
+
+  since = 0;
+  lastCsv = null;
+  lastCsvName = p.out;
+  document.getElementById("log").innerHTML = "";
+  document.getElementById("tableWrap").innerHTML =
+    '<div class="placeholder">Scan in progress&hellip;</div>';
+  document.getElementById("saveBtn").disabled = true;
+  document.getElementById("copyBtn").disabled = true;
+  document.getElementById("reviewLink").style.display = "none";
+  setBusy(true);
+  setStatus("running", "Running");
+  poll();
+}
+
+async function stopRun() {
+  try { await fetch("/api/cancel", { method: "POST" }); } catch (err) { /* ignore */ }
+}
+
+function poll() {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(tick, 700);
+}
+
+async function tick() {
+  let s;
+  try {
+    const r = await fetch(`/api/status?since=${since}`, { cache: "no-store" });
+    s = await r.json();
+  } catch (err) {
+    setStatus("error", "Lost contact with the run server");
+    setBusy(false);
+    return;
+  }
+  if (s.state === "idle") { setBusy(false); setStatus("", "Idle"); return; }
+
+  if (s.log && s.log.length) { appendLog(s.log); since = s.next; }
+
+  if (s.state === "running") {
+    setStatus("running", "Running", s.elapsed);
+    setBusy(true);
+    poll();
+    return;
+  }
+
+  setBusy(false);
+  if (s.state === "done") {
+    lastCsv = s.csv || "";
+    lastCsvName = s.csv_name || lastCsvName;
+    setStatus("done", `Finished \u2014 ${s.rows} candidate${s.rows === 1 ? "" : "s"}`, s.elapsed);
+    renderTable(lastCsv);
+    document.getElementById("saveBtn").disabled = !lastCsv;
+    document.getElementById("copyBtn").disabled = !lastCsv;
+    const link = document.getElementById("reviewLink");
+    link.href = `candidate_gui.html?csv=${encodeURIComponent(lastCsvName)}`;
+    link.style.display = "inline";
+  } else if (s.state === "cancelled") {
+    setStatus("cancelled", "Stopped", s.elapsed);
+  } else {
+    setStatus("error", "Failed", s.elapsed);
+    showError(s.error || "The pipeline reported an error \u2014 see the log above.");
+  }
+}
+
+function appendLog(lines) {
+  const pre = document.getElementById("log");
+  const wrap = document.getElementById("logWrap");
+  const atBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 40;
+  lines.forEach(l => {
+    const span = document.createElement("span");
+    if (l.startsWith("$ ")) span.className = "cmdline";
+    else if (/^Stage \d/.test(l) || l.startsWith("===")) span.className = "stage";
+    span.textContent = l + "\n";
+    pre.appendChild(span);
+  });
+  if (atBottom) wrap.scrollTop = wrap.scrollHeight;
+}
+
+/* --------------------------------------------------------- results table */
+
+function splitCsvLine(line) {
+  const cells = [];
+  let cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') { inQ = false; }
+      else { cur += ch; }
+    } else if (ch === '"') { inQ = true; }
+    else if (ch === ",") { cells.push(cur); cur = ""; }
+    else { cur += ch; }
+  }
+  cells.push(cur);
+  return cells.map(c => c.trim());
+}
+
+function fmt(v) {
+  if (v === undefined || v === null || v === "") return "\u2014";
+  const t = String(v).trim();
+  if (/^-?\d*\.?\d+(e[-+]?\d+)?$/i.test(t)) {
+    const f = Number(t);
+    if (Number.isInteger(f)) return String(f);
+    if (Math.abs(f) !== 0 && (Math.abs(f) >= 1e6 || Math.abs(f) < 1e-4)) return f.toExponential(3);
+    return f.toFixed(5).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  return t;
+}
+
+function renderTable(csv) {
+  const wrap = document.getElementById("tableWrap");
+  const lines = (csv || "").trim().split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) {
+    wrap.innerHTML = '<div class="placeholder">No candidates survived all stages. ' +
+      'Try widening the discovery window, lowering the minimum detection count, ' +
+      'or loosening the nuclear tolerance.</div>';
+    return;
+  }
+  const headers = splitCsvLine(lines[0]);
+  const table = document.createElement("table");
+  table.className = "results";
+
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  headers.forEach(h => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (let i = 1; i < lines.length; i++) {
+    const cells = splitCsvLine(lines[i]);
+    const tr = document.createElement("tr");
+    cells.forEach((c, j) => {
+      const td = document.createElement("td");
+      td.textContent = fmt(c);
+      const lower = String(c).trim().toLowerCase();
+      if (lower === "true") {
+        td.className = headers[j] === "gaia_agn" ? "agn" : "true";
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+
+  wrap.innerHTML = "";
+  wrap.appendChild(table);
+}
+
+/* ---------------------------------------------------------------- saving */
+
+function downloadCsv() {
+  if (!lastCsv) return;
+  const blob = new Blob([lastCsv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = lastCsvName;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1500);
+}
+
+async function copyCsv() {
+  if (!lastCsv) return;
+  const btn = document.getElementById("copyBtn");
+  try {
+    await navigator.clipboard.writeText(lastCsv);
+    btn.textContent = "Copied";
+  } catch (err) {
+    btn.textContent = "Copy failed";
+  }
+  setTimeout(() => { btn.textContent = "Copy CSV"; }, 1600);
+}
+
+/* ------------------------------------------------------------------ init */
+
+syncPresets();
+setRising(false);
+updateCmdPreview();
+tick();   /* reattach to a run already in progress if the page was reloaded */
+</script>
+
+</body>
+</html>
