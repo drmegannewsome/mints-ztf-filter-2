@@ -1,0 +1,7 @@
+alerce
+iinuclear
+numpy
+pandas
+astropy
+astroquery
+matplotlib
