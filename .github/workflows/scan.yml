@@ -2,28 +2,32 @@ name: ZTF scan
 
 on:
   schedule:
-    - cron: "0 13 * * *"        # 13:00 UTC daily (~08:00 Austin, after the night's alerts)
+    - cron: "0 13 * * *"        # 13:00 UTC daily (~08:00 Austin)
   workflow_dispatch:
     inputs:
       days:
-        description: "Discovery window (--days)"
+        description: "Discovery window in days (--days)"
         type: choice
-        options: ["14", "30", "60", "90"]
-        default: "90"
+        options: ["14", "30", "45", "60", "90"]
+        default: "60"
       min_ndet:
         description: "Minimum detections (--min-ndet)"
         type: choice
-        options: ["3", "5", "10", "20"]
-        default: "3"
+        options: ["4", "5", "8", "12", "20"]
+        default: "4"
       sigma_max:
-        description: "Nuclear tolerance (--sigma-max)"
+        description: "Nuclear tolerance in sigma (--sigma-max) — does NOT affect runtime"
         type: choice
-        options: ["1.0", "1.5", "2.0", "3.0"]
-        default: "3.0"
+        options: ["0.5", "1.0", "1.5", "2.0", "3.0"]
+        default: "1.0"
       rising:
         description: "Require rising (--rising)"
         type: boolean
         default: false
+      max_objects:
+        description: "Cap objects screened — leave blank for no cap (smoke tests only)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -35,7 +39,7 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -47,17 +51,34 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run scan
+        env:
+          # The `||` fallbacks supply the scheduled-run values, since `inputs`
+          # is empty on a cron trigger. Keep them in step with the dispatch
+          # defaults above.
+          DAYS:        ${{ inputs.days        || '60'  }}
+          MIN_NDET:    ${{ inputs.min_ndet    || '4'   }}
+          SIGMA_MAX:   ${{ inputs.sigma_max   || '1.0' }}   # runtime-neutral; raise to keep more rows
+          RISING:      ${{ inputs.rising      || 'false' }}
+          MAX_OBJECTS: ${{ inputs.max_objects || ''    }}
         run: |
-          python -u ztf_filter_6000.py \
-            --days "${{ inputs.days || '90' }}" \
-            --min-ndet "${{ inputs.min_ndet || '3' }}" \
-            --sigma-max "${{ inputs.sigma_max || '3.0' }}" \
-            ${{ inputs.rising == true && '--rising' || '' }} \
-            --workers 4 --rate 5 \
-            --out docs/candidates.csv
+          set -euo pipefail
+          ARGS=(--days "$DAYS"
+                --min-ndet "$MIN_NDET"
+                --sigma-max "$SIGMA_MAX"
+                --workers 8
+                --rate 5
+                --out docs/candidates.csv)
+          if [ "$RISING" = "true" ]; then ARGS+=(--rising); fi
+          if [ -n "$MAX_OBJECTS" ]; then ARGS+=(--max-objects "$MAX_OBJECTS"); fi
+          echo "+ python -u ztf_filter_6000.py ${ARGS[*]}"
+          python -u ztf_filter_6000.py "${ARGS[@]}"
 
       - name: Stamp the run
-        run: date -u +"%Y-%m-%dT%H:%M:%SZ" > docs/last_run.txt
+        run: |
+          {
+            date -u +"%Y-%m-%dT%H:%M:%SZ"
+            echo "days=${{ inputs.days || '60' }} min_ndet=${{ inputs.min_ndet || '4' }} sigma_max=${{ inputs.sigma_max || '1.0' }} rising=${{ inputs.rising || 'false' }}"
+          } > docs/last_run.txt
 
       - name: Commit results
         run: |
