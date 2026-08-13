@@ -288,13 +288,16 @@ def query_recent_discoveries(client, days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS,
     out = pd.concat(frames, ignore_index=True)
     if max_objects:
         out = out.iloc[:max_objects]
-    ra_col = next((c for c in ("meanra", "ra") if c in out.columns), None)
+    ra_col  = next((c for c in ("meanra", "ra") if c in out.columns), None)
     dec_col = next((c for c in ("meandec", "dec") if c in out.columns), None)
-    return pd.DataFrame({
+    res = pd.DataFrame({
         "oid": out["oid"].astype(str).values,
-        "meanra": out[ra_col].values if ra_col else np.nan,
+        "meanra":  out[ra_col].values  if ra_col  else np.nan,
         "meandec": out[dec_col].values if dec_col else np.nan,
     })
+    for c in ("firstmjd", "ndet"):
+        res[c] = out[c].values if c in out.columns else np.nan
+    return res
 
 
 def query_cvnova_oids(client, days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS,
@@ -820,7 +823,10 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
         star_map = {}
         oids = [o for (o, _ra, _dec) in positions]
         default_star = None
-
+    
+    #build a lookup right after the Stage-1b block and attach it to the photometry survivors:
+    meta = {str(r.oid): (r.firstmjd, r.ndet) for r in recent.itertuples()}
+    
     # Stage 2: photometry (alert + forced) + epochs, only on the survivors.
     photo = _parallel_map(
         lambda oid: screen_photometry(oid, _get_client(), use_forced=use_forced), oids, workers,
@@ -831,6 +837,7 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
         s["is_star"] = star
         s["gaia_pm_sig"] = ginfo.get("pm_sig")
         s["gaia_plx_sig"] = ginfo.get("plx_sig")
+        s["firstmjd"], s["ndet"] = meta.get(s["oid"], (np.nan, np.nan))
     print(f"Stage 2  epochs  : {len(photo_pass)} have >= {MIN_EPOCHS} matched g/r epochs")
 
     blue = [s for s in photo_pass if s["is_blue"]]
@@ -886,7 +893,7 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
 
 
 def results_table(finalists):
-    cols = ["oid", "ra", "dec", "n_matched_epochs", "gr_color", "is_blue",
+    cols = ["oid", "ra", "dec", "firstmjd", "ndet", "n_matched_epochs", "gr_color", "is_blue",
             "is_rising", "delta_mag", "is_star", "gaia_pm_sig", "gaia_plx_sig",
             "nuclear_sigma", "nuclear_pvalue", "is_nuclear",
             "gaia_agn", "gaia_agn_grade", "gaia_agn_prob",
