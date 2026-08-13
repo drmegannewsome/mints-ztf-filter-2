@@ -1,0 +1,68 @@
+name: ZTF scan
+
+on:
+  schedule:
+    - cron: "0 13 * * *"        # 13:00 UTC daily (~08:00 Austin, after the night's alerts)
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Discovery window (--days)"
+        type: choice
+        options: ["14", "30", "60", "90"]
+        default: "90"
+      min_ndet:
+        description: "Minimum detections (--min-ndet)"
+        type: choice
+        options: ["3", "5", "10", "20"]
+        default: "3"
+      sigma_max:
+        description: "Nuclear tolerance (--sigma-max)"
+        type: choice
+        options: ["1.0", "1.5", "2.0", "3.0"]
+        default: "3.0"
+      rising:
+        description: "Require rising (--rising)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ztf-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run scan
+        run: |
+          python -u ztf_filter_6000.py \
+            --days "${{ inputs.days || '90' }}" \
+            --min-ndet "${{ inputs.min_ndet || '3' }}" \
+            --sigma-max "${{ inputs.sigma_max || '3.0' }}" \
+            ${{ inputs.rising == true && '--rising' || '' }} \
+            --workers 4 --rate 5 \
+            --out docs/candidates.csv
+
+      - name: Stamp the run
+        run: date -u +"%Y-%m-%dT%H:%M:%SZ" > docs/last_run.txt
+
+      - name: Commit results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/candidates.csv docs/last_run.txt
+          git diff --staged --quiet || git commit -m "Automated ZTF scan $(date -u +%F)"
+          git push
