@@ -133,8 +133,8 @@
 
 <header>
   <h1>ZTF Nuclear Transient Candidates</h1>
-  <span class="sub">blue &middot; non-stellar &middot; non-CV &middot; nuclear</span>
-  <span class="links"><a href="candidate_gui.html?csv=candidates.csv" target="_blank">Review GUI &#8599;</a></span>
+  <span class="sub">Blue (g-r < -0.05), nuclear (using <i>iinuclear</i>) transients with stars and likely CVs filtered out </span>
+  <h1><span class="links"><a href="candidate_gui.html?csv=candidates.csv" target="_blank">Review &#8599;</a></span></h1>
 </header>
 
 <div class="layout">
@@ -143,8 +143,12 @@
     <h2>Filters</h2>
     <p class="lede">
       This page reads the candidate table produced by the most recent scheduled
-      scan and narrows it in your browser. It does not run the pipeline &mdash;
-      scans are launched from the repository's Actions tab.
+      scan of ALERCE for the broadest inclusion of blue (g-r < -0.05) transients whose first
+      detection occurred in the last 60 days, whose light curves have at least 4 detections,
+      and whose nuclear association is within at most 1-sigma (using <i>iinuclear</i>). You
+      may use the following boxes to narrow the list even more using stricter cuts, including
+      selecting rising-only candidates, or leave the defaults to show the full list. Once you
+      have a shortlist you want to inspect more closely, click "Review" in the upper right corner.
     </p>
 
     <div class="field" id="field-days">
