@@ -134,7 +134,7 @@
 <header>
   <h1>ZTF Nuclear Transient Candidates</h1>
   <span class="sub">Blue (g-r < -0.05), nuclear (using <i>iinuclear</i>) transients with stars and likely CVs filtered out </span>
-  <span class="links"><a href="candidate_gui.html?csv=candidates.csv" target="_blank"><h1>Review &#8599;</h1></a></span>
+  <span class="links"><a href="candidate_gui.html?csv=candidates.csv" target="_blank"><h1>Review Shortlist &#8599;</h1></a></span>
 </header>
 
 <div class="layout">
@@ -148,15 +148,16 @@
       and whose nuclear association is within at most 1-sigma (using <i>iinuclear</i>). You
       may use the following boxes to narrow the list even more using stricter cuts, including
       selecting rising-only candidates, or leave the defaults to show the full list. Once you
-      have a shortlist you want to inspect more closely, click "Review" in the upper right corner.
+      have a shortlist you want to inspect more closely, click "Review Shortlist" in the 
+      upper right corner.
     </p>
 
     <div class="field" id="field-days">
       <label for="days">Discovery window (days)</label>
       <span class="flag">--days</span>
       <input id="days" class="num" type="number" min="1" max="3650" step="1" value="90">
-      <span class="help">Keep objects whose <i>first</i> detection falls within this
-      many days of now.</span>
+      <span class="help">Keep objects whose first detection occurred within this
+      many days from now.</span>
       <span class="absent">The loaded table has no <code>firstmjd</code> column, so
       this value is ignored.</span>
     </div>
