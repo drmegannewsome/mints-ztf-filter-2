@@ -1,2 +1,2 @@
-2026-08-20T14:29:53Z
+2026-08-21T14:28:09Z
 days=60 min_ndet=4 sigma_max=1.0 rising=false
