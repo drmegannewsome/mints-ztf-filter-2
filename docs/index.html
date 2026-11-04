@@ -3,19 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ZTF Nuclear Transient Candidates</title>
+<title>ZTF Nuclear Transient Review</title>
 <style>
   :root {
     --bg: #a288bf;
     --panel: #a288bf;
     --border: #250d40;
     --text: #000000;
+    --whitetext: #ffffff;
     --muted: #2b2b2b;
+    --mint: #c7edd3;          /* every input box on the page */
+    --ink: #2b2b2b;           /* dark-gray text typed into those boxes */
     --accent: #9de8b5;
-    --go: #2ea043;
-    --go-hover: #9de8b5;
-    --warn: #9de8b5;
-    --stop: #9de8b5;
+    --keep: #2ea043;
+    --keep-hover: #9de8b5;
+    --remove: #8f1512;
+    --agn: #d29922;
+    --active: #1f6feb;
+    --zfound: #0b3d1e;
     --serif: "Times New Roman", Times, "Liberation Serif", Georgia, serif;
   }
   * { box-sizing: border-box; font-family: var(--serif); }
@@ -23,229 +28,345 @@
   body {
     background: var(--bg); color: var(--text);
     display: flex; flex-direction: column; height: 100vh; overflow: hidden;
-    font-size: 16px; font-variant-numeric: tabular-nums;
+    font-size: 15px;
   }
+
+  /* ---- shared input look: mint box, dark-gray text ---- */
+  .box {
+    background: var(--mint); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 5px 8px; font-size: 14px;
+  }
+  .box::placeholder { color: #5f5f5f; opacity: 1; }
+  .box:focus { outline: 2px solid var(--keep); outline-offset: 0; }
+
   header {
-    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+    padding: 10px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
     display: flex; align-items: baseline; gap: 14px; flex-shrink: 0; flex-wrap: wrap;
   }
-  header h1 { font-size: 21px; margin: 0; font-weight: 700; color: #fff; }
-  header .sub { font-size: 15px; color: var(--muted); font-style: italic; }
-  header .links { margin-left: auto; font-size: 14px; }
-  header .links a { color: var(--accent); }
+  header h1 { font-size: 20px; margin: 0; font-weight: 700; color: #fff; }
+  header .sub { font-size: 14px; color: var(--muted); font-style: italic; }
+  header .stamp { font-size: 13px; color: var(--muted); margin-left: auto; }
+  .sidebar-foot {
+    padding: 6px 12px; border-top: 1px solid var(--border); font-size: 12.5px;
+    color: var(--muted); flex-shrink: 0;
+  }
 
-  .layout { flex: 1; display: flex; overflow: hidden; }
+  .layout { flex: 1; display: flex; overflow: hidden; min-height: 0; }
 
-  /* ---- filters ---- */
-  .controls {
-    width: 320px; flex-shrink: 0; border-right: 1px solid var(--border);
-    background: var(--panel); overflow-y: auto; padding: 16px 18px 24px;
+  /* ---- sidebar ---- */
+  .sidebar {
+    width: 265px; flex-shrink: 0; border-right: 1px solid var(--border);
+    background: var(--panel); display: flex; flex-direction: column; overflow: hidden;
   }
-  .controls h2 {
-    font-size: 13px; text-transform: uppercase; letter-spacing: 0.07em;
-    color: var(--muted); margin: 0 0 6px 0; font-weight: 700;
+  .sidebar-header { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .addrow { display: flex; gap: 6px; }
+  .addrow input { flex: 1; min-width: 0; font-family: monospace; font-size: 13px; }
+  .load-btn {
+    background: var(--keep); color: #fff; border: none; border-radius: 5px;
+    padding: 5px 12px; font-size: 14px; font-weight: 700; cursor: pointer;
   }
-  .controls .lede {
-    font-size: 13.5px; color: var(--muted); line-height: 1.5; margin: 0 0 20px 0; font-style: italic;
+  .load-btn:hover { opacity: 0.85; }
+  .add-msg { font-size: 12.5px; color: var(--muted); margin-top: 6px; line-height: 1.35; min-height: 1.35em; }
+  .add-msg.err { color: #6b0f0d; font-weight: 700; }
+
+  .source-list { flex: 1; overflow-y: auto; }
+  .group-header {
+    padding: 6px 12px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--whitetext); background: var(--border);
+    border-bottom: 1px solid var(--border); border-top: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 1; font-weight: 700;
   }
-  .field { margin-bottom: 20px; }
-  .field > label {
-    display: block; font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 2px;
+  .group-header.agn { color: var(--agn); }
+  .group-empty { padding: 8px 12px; font-size: 13px; color: var(--muted); font-style: italic; }
+  .source-item {
+    padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
+    font-size: 14px; display: flex; flex-direction: column; gap: 2px;
   }
-  .field .flag { display: block; font-size: 13px; color: var(--muted); font-style: italic; margin-bottom: 7px; }
-  .field .help { display: block; font-size: 13px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
-  .field .absent {
-    display: none; font-size: 13px; color: var(--warn); margin-top: 5px; line-height: 1.4;
+  .source-item:hover { background: var(--accent); }
+  .source-item.active { background: var(--active); color: #fff; }
+  .source-item .name { font-weight: 700; font-family: monospace; }
+  .source-item .coords { font-size: 12px; color: var(--muted); }
+  .source-item.active .coords { color: var(--accent); }
+  .zfound { font-weight: 700; color: var(--zfound); }
+  .source-item.active .zfound { color: #fff; }
+  .badge {
+    display: inline-block; color: #fff; font-size: 10px; padding: 1px 5px;
+    border-radius: 4px; margin-left: 6px; vertical-align: middle; font-weight: 700;
+    font-family: var(--serif);
   }
-  .field.unavailable .absent { display: block; }
-  input.num {
-    width: 100%; background: #c7edd3; border: 1px solid var(--border); color: var(--text);
-    border-radius: 5px; padding: 7px 9px; font-size: 16px;
+  .badge.kept { background: var(--keep); }
+  .badge.added { background: var(--border); }
+  .badge.agn { background: var(--agn); color: #1c1500; }
+  .badge.unk { background: var(--keep); }
+  .empty-msg { padding: 14px 12px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+
+  /* ---- right-hand column: filter bar, viewers, follow-up list ---- */
+  .right { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+
+  .filterbar {
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 16px;
+    padding: 9px 16px 10px; border-bottom: 1px solid var(--border);
+    background: var(--panel); flex-shrink: 0;
   }
-  input.num:focus { outline: 1px solid var(--accent); }
-  .checkrow { display: flex; align-items: center; gap: 9px; margin-top: 4px; }
-  .checkrow input { width: 16px; height: 16px; accent-color: var(--go); cursor: pointer; }
-  .checkrow label { font-size: 15.5px; cursor: pointer; color: var(--text); }
-  .runrow { display: flex; gap: 9px; margin-top: 6px; }
-  .go-btn {
-    flex: 1; background: var(--go); color: #fff; border: none; border-radius: 5px;
-    padding: 10px 14px; font-size: 17px; font-weight: 700; cursor: pointer;
+  .f { display: flex; flex-direction: column; gap: 3px; }
+  .f > label { font-size: 13.5px; font-weight: 700; color: #fff; }
+  .f input.box[type=number] { width: 84px; }
+  .f.unavailable > label::after { content: " (not in table)"; font-weight: 400; font-style: italic; color: var(--muted); }
+  .f.unavailable input { opacity: 0.55; }
+  .checkrow { display: flex; align-items: center; gap: 7px; height: 30px; }
+  .checkrow input { width: 16px; height: 16px; accent-color: var(--keep); cursor: pointer; }
+  .checkrow label { font-size: 15px; cursor: pointer; color: var(--text); font-weight: 400; }
+  .btnrow { display: flex; gap: 8px; align-items: center; }
+  .apply-btn {
+    background: var(--keep); color: #fff; border: 2px solid transparent; border-radius: 5px;
+    padding: 5px 18px; font-size: 15px; font-weight: 700; cursor: pointer;
   }
-  .go-btn:hover { background: var(--go-hover); }
+  .apply-btn:hover { background: #26873a; }
+  .apply-btn.dirty { border-color: #fff; }
+  .apply-btn.dirty::after { content: " \2022"; }
   .reset-btn {
     background: transparent; color: var(--text); border: 1px solid var(--border);
-    border-radius: 5px; padding: 10px 14px; font-size: 16px; cursor: pointer;
+    border-radius: 5px; padding: 5px 12px; font-size: 14.5px; cursor: pointer;
   }
-  .reset-btn:hover { background: #21262d; }
-  .cmd {
-    margin-top: 16px; padding: 9px 11px; background: #c7edd3; border: 1px solid var(--border);
-    border-radius: 5px; font-size: 13px; color: var(--muted); line-height: 1.55; word-break: break-word;
-  }
-  .cmd b { color: var(--text); font-weight: 400; }
-  .cmd .note { display: block; margin-top: 7px; font-style: italic; }
+  .reset-btn:hover { background: var(--accent); }
+  .count { margin-left: auto; font-size: 14px; color: var(--muted); padding-bottom: 6px; }
 
-  /* ---- results ---- */
-  .output { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
-  .status-bar {
-    padding: 9px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
-    display: flex; align-items: center; gap: 14px; flex-shrink: 0; font-size: 15px; flex-wrap: wrap;
+  .viewers { flex: 2; display: flex; min-height: 0; border-bottom: 1px solid var(--border); }
+  .viewer { position: relative; min-width: 0; display: flex; flex-direction: column; }
+  .viewer.alerce { flex: 1.05; border-right: 1px solid var(--border); }
+  .viewer.legacy { flex: 1; }
+  .viewer iframe { width: 100%; height: 100%; border: none; background: #fff; flex: 1; }
+  .frame-placeholder {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; color: var(--whitetext); font-size: 14px;
+    background: var(--border); text-align: center; padding: 20px; gap: 10px;
   }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: #484f58; flex-shrink: 0; }
-  .dot.loading { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
-  .dot.ok { background: var(--go); }
-  .dot.error { background: var(--stop); }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
-  .status-bar .count { color: var(--muted); }
-  .status-bar .spacer { margin-left: auto; }
-  .status-bar button {
-    background: transparent; color: var(--accent); border: 1px solid var(--border);
-    border-radius: 5px; padding: 5px 12px; font-size: 14px; cursor: pointer;
+  .frame-placeholder small { font-size: 12px; }
+  .frame-toolbar {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    display: flex; gap: 6px; align-items: center;
   }
-  .status-bar button:hover:not(:disabled) { background: #21262d; }
-  .status-bar button:disabled { opacity: 0.35; cursor: not-allowed; }
-  .status-bar a.review { color: var(--accent); font-size: 14px; }
+  .frame-toolbar a, .frame-toolbar button, .frame-toolbar select {
+    background: var(--mint); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 9px; font-size: 13px; text-decoration: none; cursor: pointer;
+  }
+  .frame-toolbar a:hover, .frame-toolbar button:hover { background: var(--accent); }
+  .frame-toolbar .zoomlbl { font-size: 12px; color: var(--ink); background: var(--mint); border-radius: 4px; padding: 3px 5px; }
 
-  .table-wrap { flex: 1; overflow: auto; }
-  table.results { border-collapse: collapse; font-size: 14.5px; white-space: nowrap; }
-  table.results th, table.results td {
-    padding: 6px 13px; text-align: left; border-bottom: 1px solid var(--border);
+  /* ---- follow-up list ---- */
+  .keep-panel { flex: 1.15; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .keep-toolbar {
+    padding: 8px 14px; border-bottom: 1px solid var(--border); display: flex;
+    align-items: center; justify-content: space-between; gap: 10px; flex-shrink: 0;
   }
-  table.results th {
-    position: sticky; top: 0; background: var(--panel); color: var(--muted);
-    font-weight: 700; font-size: 13px; z-index: 1; cursor: pointer; user-select: none;
+  .keep-toolbar h2 { font-size: 16px; margin: 0 0 3px 0; font-weight: 700; color: #fff; }
+  .keep-toolbar .current { font-size: 13px; color: var(--muted); font-family: monospace; }
+  .btn-row { display: flex; gap: 8px; }
+  .keep-btn {
+    background: var(--keep); color: #fff; border: none; border-radius: 6px;
+    padding: 7px 16px; font-size: 14.5px; font-weight: 700; cursor: pointer;
   }
-  table.results th:hover { color: var(--text); }
-  table.results th .arrow { color: var(--accent); }
-  table.results tr:hover td { background: #1c2128; }
-  table.results td.true { color: var(--go-hover); }
-  table.results td.agn { color: var(--warn); }
-  .placeholder {
-    padding: 26px 20px; color: var(--muted); font-size: 15.5px; font-style: italic;
-    line-height: 1.6; max-width: 62ch;
+  .keep-btn:hover:not(:disabled) { background: #26873a; }
+  .keep-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .keep-btn.kept { background: var(--keep); color: #fff; }
+  .export-btn {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 12px; font-size: 14px; cursor: pointer;
   }
-  .banner {
-    margin: 14px 18px; padding: 10px 13px; border-radius: 5px; font-size: 15px;
-    border: 1px solid var(--stop); color: #f0b0ae; background: rgba(218,54,51,0.09); line-height: 1.5;
+  .export-btn:hover { background: var(--accent); }
+  .keep-table-wrap { flex: 1; overflow: auto; }
+  table.keep-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  table.keep-table th, table.keep-table td {
+    padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle;
   }
+  table.keep-table th {
+    color: var(--muted); font-weight: 700; text-transform: uppercase; font-size: 11px;
+    letter-spacing: 0.04em; position: sticky; top: 0; background: var(--panel); z-index: 1;
+  }
+  table.keep-table td.mono { font-family: monospace; white-space: nowrap; }
+  table.keep-table tbody tr:hover { background: rgba(157, 232, 181, 0.35); }
+  table.keep-table select.box { font-size: 13px; padding: 3px 6px; }
+  table.keep-table input.z { width: 96px; font-family: monospace; font-size: 13px; padding: 3px 6px; }
+  table.keep-table td.ztd { white-space: nowrap; }
+  table.keep-table td.ztd a.zfound { text-decoration: underline; }
+  .zsrc { font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .speclink { font-size: 12px; margin-left: 6px; color: var(--text); }
+  table.keep-table td.ctd { min-width: 250px; width: 36%; }
+  textarea.comment { width: 100%; resize: vertical; display: block; font-size: 13px; line-height: 1.3; padding: 4px 6px; }
+  .cc { font-size: 10.5px; color: var(--muted); text-align: right; margin-top: 1px; }
+  .remove-btn {
+    background: transparent; color: var(--remove); border: 1px solid var(--border); font-weight: 700;
+    border-radius: 5px; padding: 3px 8px; font-size: 12.5px; cursor: pointer;
+  }
+  .remove-btn:hover { background: var(--remove); color: #fff; }
+  .empty-keep { padding: 18px 14px; color: var(--muted); font-size: 14px; }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>ZTF Nuclear Transient Candidates</h1>
-  <span class="sub">Blue (g-r < -0.05), nuclear (using <i>iinuclear</i>) transients with stars and likely CVs filtered out </span>
-  <span class="links"><a href="candidate_gui.html?csv=candidates.csv" target="_blank"><h1>Review Shortlist &#8599;</h1></a></span>
+  <h1>ZTF Nuclear Transient Review</h1>
+  <span class="sub">Blue (g&minus;r &lt; &minus;0.05), nuclear transients; stars and likely CVs removed</span>
+  <span class="stamp" id="stampText"></span>
 </header>
 
 <div class="layout">
 
-  <div class="controls">
-    <h2>Filters</h2>
-    <p class="lede">
-      This page reads the candidate table produced by the most recent scheduled
-      scan of ALERCE for the broadest inclusion of blue (g-r < -0.05) transients whose first
-      detection occurred in the last 60 days, whose light curves have at least 4 detections,
-      and whose nuclear association is within at most 1-sigma (using <i>iinuclear</i>). You
-      may use the following boxes to narrow the list even more using stricter cuts, including
-      selecting rising-only candidates, or leave the defaults to show the full list. Once you
-      have a shortlist you want to inspect more closely, click "Review Shortlist" in the 
-      upper right corner.
-    </p>
-
-    <div class="field" id="field-days">
-      <label for="days">Discovery window (days)</label>
-      <span class="flag">--days</span>
-      <input id="days" class="num" type="number" min="1" max="3650" step="1" value="90">
-      <span class="help">Keep objects whose first detection occurred within this
-      many days from now.</span>
-      <span class="absent">The loaded table has no <code>firstmjd</code> column, so
-      this value is ignored.</span>
-    </div>
-
-    <div class="field" id="field-min_ndet">
-      <label for="min_ndet">Minimum detections</label>
-      <span class="flag">--min-ndet</span>
-      <input id="min_ndet" class="num" type="number" min="1" max="100000" step="1" value="5">
-      <span class="help">Total alert count.</span>
-      <span class="absent">The loaded table has no <code>ndet</code> column, so this
-      value is ignored.</span>
-    </div>
-
-    <div class="field" id="field-sigma_max">
-      <label for="sigma_max">Nuclear tolerance (&sigma;)</label>
-      <span class="flag">--sigma-max</span>
-      <input id="sigma_max" class="num" type="number" min="0.01" max="100" step="0.1" value="1.0">
-      <span class="help">Maximum offset from the host centre from the
-      <i>iinuclear</i> test.</span>
-      <span class="absent">The loaded table has no <code>nuclear_sigma</code> column,
-      so this value is ignored.</span>
-    </div>
-
-    <div class="field" id="field-rising">
-      <label>Light-curve trend</label>
-      <span class="flag">--rising</span>
-      <div class="checkrow">
-        <input type="checkbox" id="rising">
-        <label for="rising">Require rising</label>
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="addrow">
+        <input id="addName" class="box" type="text" placeholder="Add target to list"
+               aria-label="Add target to list" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button class="load-btn" id="addBtn" type="button">Add</button>
       </div>
-      <span class="help">Latest g/r epoch brighter than the weighted mean of the
-      prior two.</span>
-      <span class="absent">The loaded table has no <code>is_rising</code> column, so
-      this is ignored.</span>
+      <div class="add-msg" id="addMsg" role="status">ZTF name, e.g. ZTF26abcdefg</div>
+    </div>
+    <div class="source-list" id="sourceList"></div>
+    <div class="sidebar-foot">&uarr;/&darr; navigate &middot; K keep/unkeep</div>
+  </aside>
+
+  <div class="right">
+
+    <div class="filterbar" id="filterBar">
+      <div class="f" id="field-days">
+        <label for="days" title="Keep objects whose first detection occurred within this many days from now. The nightly scan only reaches back as far as the window it was run with (see 'Last scan').">Discovery window (days)</label>
+        <input id="days" class="box" type="number" min="1" max="3650" step="1">
+      </div>
+      <div class="f" id="field-min_ndet">
+        <label for="min_ndet" title="Minimum total alert count.">Min. detections</label>
+        <input id="min_ndet" class="box" type="number" min="1" max="100000" step="1">
+      </div>
+      <div class="f" id="field-sigma_max">
+        <label for="sigma_max" title="Maximum offset from the host centre, in sigma, from the iinuclear test.">Nuclear tolerance (&sigma;)</label>
+        <input id="sigma_max" class="box" type="number" min="0.01" max="100" step="0.1">
+      </div>
+      <div class="f" id="field-max_mag">
+        <label for="max_mag" title="Keep candidates whose latest matched g/r epoch is at least this bright (difference-image magnitude, g and r combined). Pick a suggestion or type any value; leave blank for no limit.">Latest epoch brighter than (m &lt;)</label>
+        <input id="max_mag" class="box" type="number" step="0.1" min="10" max="25" list="magOptions" placeholder="any">
+        <datalist id="magOptions">
+          <option value="18"></option><option value="18.5"></option><option value="19"></option>
+          <option value="19.5"></option><option value="20"></option><option value="20.5"></option>
+        </datalist>
+      </div>
+      <div class="f" id="field-rising">
+        <label title="Latest g/r epoch brighter than the weighted mean of the prior two.">Light-curve trend</label>
+        <div class="checkrow">
+          <input type="checkbox" id="rising">
+          <label for="rising">Require rising</label>
+        </div>
+      </div>
+      <div class="f">
+        <div class="btnrow">
+          <button class="apply-btn" id="applyBtn" type="button">Apply</button>
+          <button class="reset-btn" id="resetBtn" type="button">Reset</button>
+        </div>
+      </div>
+      <div class="count" id="countText"></div>
     </div>
 
-    <div class="runrow">
-      <button class="go-btn" id="applyBtn">Apply filters</button>
-      <button class="reset-btn" id="resetBtn">Reset</button>
+    <div class="viewers">
+      <div class="viewer alerce">
+        <div class="frame-toolbar" id="alerceToolbar" style="display:none;">
+          <a id="alerceExternal" href="#" target="_blank" rel="noopener">ALeRCE &#8599;</a>
+        </div>
+        <iframe id="alerceFrame" style="display:none;"></iframe>
+        <div class="frame-placeholder" id="alercePlaceholder">
+          <span>Select a source to load its ALeRCE page.</span>
+          <small>If ALeRCE refuses to embed (X-Frame-Options), use the &ldquo;ALeRCE &#8599;&rdquo; link.</small>
+        </div>
+      </div>
+
+      <div class="viewer legacy">
+        <div class="frame-toolbar" id="legacyToolbar" style="display:none;">
+          <select id="lsLayer">
+            <option value="ls-dr11">ls-dr11</option>
+            <option value="ls-dr10">ls-dr10</option>
+            <option value="ls-dr10-model">ls-dr10-model</option>
+            <option value="ls-dr9">ls-dr9</option>
+            <option value="unwise-neo7">unwise-neo7</option>
+            <option value="sdss">sdss</option>
+            <option value="galex">galex</option>
+          </select>
+          <button type="button" id="zoomOut">&minus;</button>
+          <span class="zoomlbl" id="zoomLabel">z16</span>
+          <button type="button" id="zoomIn">+</button>
+          <a id="legacyExternal" href="#" target="_blank" rel="noopener">&#8599;</a>
+        </div>
+        <iframe id="legacyFrame" style="display:none;"></iframe>
+        <div class="frame-placeholder" id="legacyPlaceholder">Legacy Survey cutout will load here.</div>
+      </div>
     </div>
 
-    <div class="cmd" id="cmdPreview"></div>
+    <div class="keep-panel">
+      <div class="keep-toolbar">
+        <div>
+          <h2>Follow-up List</h2>
+          <span class="current" id="currentSourceLabel">No source selected</span>
+        </div>
+        <div class="btn-row">
+          <button class="keep-btn" id="keepBtn" type="button" disabled>Keep</button>
+          <button class="export-btn" id="exportBtn" type="button">Export CSV</button>
+        </div>
+      </div>
+      <div class="keep-table-wrap">
+        <table class="keep-table" id="keepTable">
+          <thead>
+            <tr>
+              <th>Name</th><th>RA</th><th>Dec</th><th>Gaia AGN</th>
+              <th>Host Spectrum?</th><th>Redshift</th><th>Comment</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="keepTbody"></tbody>
+        </table>
+        <div class="empty-keep" id="emptyKeep">
+          No sources kept yet. Select a source and click &ldquo;Keep&rdquo; to add it here.
+        </div>
+      </div>
+    </div>
+
   </div>
-
-  <div class="output">
-    <div class="status-bar">
-      <span class="dot loading" id="dot"></span>
-      <span id="statusText">Loading candidate table&hellip;</span>
-      <span class="count" id="countText"></span>
-      <span class="spacer"></span>
-      <button id="reloadBtn">Reload data</button>
-      <button id="copyBtn" disabled>Copy CSV</button>
-      <button id="saveBtn" disabled>Save CSV</button>
-    </div>
-
-    <div id="errorSlot"></div>
-
-    <div class="table-wrap" id="tableWrap">
-      <div class="placeholder" id="placeholder">Loading&hellip;</div>
-    </div>
-  </div>
-
 </div>
 
 <script>
 "use strict";
 
-var DEFAULTS = { days: 60, min_ndet: 4, sigma_max: 1.0, rising: false };
-var CSV_FILE = "candidates.csv";
-var STAMP_FILE = "last_run.txt";
+const DEFAULTS = { days: 60, min_ndet: 4, sigma_max: 1.0, max_mag: null, rising: false };
+const HOST_SPEC_OPTIONS = ["None", "SDSS", "DESI", "Other"];
+const COMMENT_MAX = 1000;
+const ALERCE_API = "https://api.alerce.online/ztf/v1/objects/";
+const STAMP_FILE = "last_run.txt";
+const ZTF_NAME_RE = /^ZTF\d{2}[a-z]{7}$/;
 
-var allRows = [];
-var headers = [];
-var available = { days: false, min_ndet: false, sigma_max: false, rising: false };
-var loaded = false;
-var shownCsv = null;
-var lastKeep = [];
-var sortCol = null;
-var sortDesc = false;
+let csvFile = "candidates.csv";
+let candidates = [];        // every row of the scan CSV
+let extras = [];            // targets added by hand that are not in the CSV
+const forced = new Set();   // CSV targets added by hand: shown whatever the filters say
+let visible = [];           // what the sidebar currently lists
+let kept = [];
+let activeOid = null;
+let hasAgnColumn = false;
+let loaded = false;
+let loadError = "";
+let applied = null;         // filter values last applied
+let lsZoom = 16;
+let available = { days: false, min_ndet: false, sigma_max: false, max_mag: false, rising: false };
 
-function $(id) { return document.getElementById(id); }
+const $ = id => document.getElementById(id);
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
 
-/* ---------------------------------------------------------------- helpers */
+/* ---------------------------------------------------------------- parsing */
 
 function splitCsvLine(line) {
-  var cells = [], cur = "", inQ = false, i, ch;
-  for (i = 0; i < line.length; i++) {
-    ch = line[i];
+  const cells = [];
+  let cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
     if (inQ) {
       if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
       else if (ch === '"') { inQ = false; }
@@ -255,313 +376,624 @@ function splitCsvLine(line) {
     else { cur += ch; }
   }
   cells.push(cur);
-  return cells.map(function (c) { return c.trim(); });
+  return cells.map(c => c.trim());
 }
 
-function csvCell(v) {
-  var s = (v === null || v === undefined) ? "" : String(v);
-  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-}
-
-function fmt(v) {
-  if (v === undefined || v === null || v === "") return "\u2014";
-  var t = String(v).trim();
-  if (/^-?\d*\.?\d+(e[-+]?\d+)?$/i.test(t)) {
-    var f = Number(t);
-    if (Number.isInteger(f)) return String(f);
-    if (Math.abs(f) !== 0 && (Math.abs(f) >= 1e6 || Math.abs(f) < 1e-4)) return f.toExponential(3);
-    return f.toFixed(5).replace(/0+$/, "").replace(/\.$/, "");
+/* A header-only file is a valid result (a scan that found nothing). */
+function parseCsv(text) {
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length < 1) return { rows: [], headers: [] };
+  const headers = splitCsvLine(lines[0]);
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = splitCsvLine(lines[i]);
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = cells[idx]; });
+    if (row.oid) rows.push(row);
   }
-  return t;
+  return { rows, headers };
 }
 
-function nowMjd() { return Date.now() / 86400000 + 40587; }   /* Unix epoch = MJD 40587 */
-
-function isTrue(v) { return String(v).trim().toLowerCase() === "true"; }
-
-function showError(html) {
-  $("errorSlot").innerHTML = html ? '<div class="banner">' + html + '</div>' : "";
+/* pandas writes True/False/"" (NaN -> empty). Empty/absent => unknown (null). */
+function parseTriBool(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim().toLowerCase();
+  if (s === "" || s === "nan" || s === "none") return null;
+  if (["true", "1", "yes", "y", "t"].includes(s)) return true;
+  if (["false", "0", "no", "n", "f"].includes(s)) return false;
+  return null;
 }
 
-function setStatus(state, text) {
-  $("dot").className = "dot " + (state || "");
-  $("statusText").textContent = text;
+function num(v) {
+  if (v === undefined || v === null || String(v).trim() === "") return null;
+  const f = parseFloat(v);
+  return isNaN(f) ? null : f;
 }
 
-function setPlaceholder(text) {
-  var wrap = $("tableWrap");
-  wrap.innerHTML = "";
-  var d = document.createElement("div");
-  d.className = "placeholder";
-  d.textContent = text;
-  wrap.appendChild(d);
+function fmtZ(z) { return String(Number(z.toFixed(5))); }
+
+function blankCandidate(oid) {
+  return {
+    oid, ra: null, dec: null, firstmjd: null, ndet: null, gr_color: null,
+    nuclear_sigma: null, latest_mag: null, is_rising: null,
+    gaia_agn: null, gaia_agn_grade: "", gaia_agn_prob: null, gaia_agn_z: null,
+    spec_checked: false, has_archival_spec: false, spec_survey: "", spec_type: "",
+    spec_z: null, spec_url: "", manual: false
+  };
 }
 
-/* --------------------------------------------------------------- controls */
+function rowToCandidate(r) {
+  return Object.assign(blankCandidate(r.oid), {
+    ra: num(r.ra), dec: num(r.dec),
+    firstmjd: num(r.firstmjd), ndet: num(r.ndet),
+    gr_color: num(r.gr_color), nuclear_sigma: num(r.nuclear_sigma),
+    latest_mag: num(r.latest_mag),
+    is_rising: parseTriBool(r.is_rising),
+    gaia_agn: parseTriBool(r.gaia_agn),
+    gaia_agn_grade: r.gaia_agn_grade || "",
+    gaia_agn_prob: num(r.gaia_agn_prob),
+    gaia_agn_z: num(r.gaia_agn_z),
+    spec_checked: parseTriBool(r.spec_checked) === true,
+    has_archival_spec: parseTriBool(r.has_archival_spec) === true,
+    spec_survey: r.spec_survey || "",
+    spec_type: r.spec_type || "",
+    spec_z: num(r.spec_z),
+    spec_url: r.spec_url || ""
+  });
+}
+
+function findCand(oid) {
+  return candidates.find(c => c.oid === oid) || extras.find(c => c.oid === oid);
+}
+
+/* ---------------------------------------------------------------- loading */
+
+function markAvailability(headers) {
+  available = {
+    days: headers.includes("firstmjd"),
+    min_ndet: headers.includes("ndet"),
+    sigma_max: headers.includes("nuclear_sigma"),
+    max_mag: headers.includes("latest_mag"),
+    rising: headers.includes("is_rising")
+  };
+  Object.keys(available).forEach(k => {
+    $("field-" + k).classList.toggle("unavailable", !available[k]);
+  });
+}
+
+async function loadCandidates() {
+  try {
+    /* Cache-bust: the Pages CDN will otherwise serve a stale CSV for minutes
+       after a scan commits a new one. */
+    const resp = await fetch(csvFile + "?t=" + Date.now(), { cache: "no-store" });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const { rows, headers } = parseCsv(await resp.text());
+    hasAgnColumn = headers.includes("gaia_agn");
+    candidates = rows.map(rowToCandidate);
+    markAvailability(headers);
+    loaded = true;
+    loadError = "";
+  } catch (err) {
+    loaded = false;
+    loadError = "Could not load " + csvFile + " (" + err.message + "). It is written by the " +
+      "ZTF scan workflow; if that has not run yet, start it from the repository's Actions tab. " +
+      "If you opened this page straight from disk, serve the docs/ folder instead " +
+      "(python -m http.server inside docs/).";
+  }
+  applyFilters();
+  loadStamp();
+}
+
+function loadStamp() {
+  fetch(STAMP_FILE + "?t=" + Date.now(), { cache: "no-store" })
+    .then(r => r.ok ? r.text() : "")
+    .catch(() => "")
+    .then(t => {
+      t = (t || "").trim().split(/\r?\n/).filter(Boolean).join("  ·  ");
+      $("stampText").textContent = t ? "Last scan: " + t : "";
+    });
+}
+
+/* ---------------------------------------------------------------- filters */
 
 function readParams() {
-  var days = parseFloat($("days").value);
-  var minNdet = parseInt($("min_ndet").value, 10);
-  var sigmaMax = parseFloat($("sigma_max").value);
+  const days = parseFloat($("days").value);
+  const nd = parseInt($("min_ndet").value, 10);
+  const sg = parseFloat($("sigma_max").value);
+  const mg = parseFloat($("max_mag").value);
   return {
     days: isFinite(days) && days > 0 ? days : DEFAULTS.days,
-    min_ndet: isFinite(minNdet) && minNdet > 0 ? minNdet : DEFAULTS.min_ndet,
-    sigma_max: isFinite(sigmaMax) && sigmaMax > 0 ? sigmaMax : DEFAULTS.sigma_max,
+    min_ndet: isFinite(nd) && nd > 0 ? nd : DEFAULTS.min_ndet,
+    sigma_max: isFinite(sg) && sg > 0 ? sg : DEFAULTS.sigma_max,
+    max_mag: isFinite(mg) ? mg : null,
     rising: $("rising").checked
   };
 }
 
-function updateCmdPreview() {
-  var p = readParams();
-  var parts = ["ztf_filter_6000.py",
-               "--days " + p.days,
-               "--min-ndet " + p.min_ndet,
-               "--sigma-max " + p.sigma_max];
-  if (p.rising) parts.push("--rising");
-  parts.push("--out candidates.csv");
-  $("cmdPreview").innerHTML =
-    "to reproduce this selection locally<br><b>python " + parts.join(" ") + "</b>" +
-    '<span class="note">Running it yourself re-queries ALeRCE and will pick up ' +
-    'anything discovered since the last scheduled scan.</span>';
+function setControls(p) {
+  $("days").value = p.days;
+  $("min_ndet").value = p.min_ndet;
+  $("sigma_max").value = p.sigma_max;
+  $("max_mag").value = p.max_mag === null ? "" : p.max_mag;
+  $("rising").checked = p.rising;
+}
+
+function nowMjd() { return Date.now() / 86400000 + 40587; }   /* Unix epoch = MJD 40587 */
+
+/* A row with no value for a column is never dropped by that column's filter. */
+function passes(c, p) {
+  if (available.sigma_max && c.nuclear_sigma !== null && c.nuclear_sigma > p.sigma_max) return false;
+  if (available.days && c.firstmjd !== null && c.firstmjd < nowMjd() - p.days) return false;
+  if (available.min_ndet && c.ndet !== null && c.ndet < p.min_ndet) return false;
+  if (available.rising && p.rising && c.is_rising !== true) return false;
+  if (available.max_mag && p.max_mag !== null && c.latest_mag !== null && c.latest_mag > p.max_mag) return false;
+  return true;
+}
+
+function applyFilters() {
+  applied = readParams();
+  refreshDirty();
+  const p = applied;
+  visible = candidates.filter(c => forced.has(c.oid) || passes(c, p)).concat(extras);
+  renderSourceList();
+  updateCount();
 }
 
 function resetFilters() {
-  $("days").value = DEFAULTS.days;
-  $("min_ndet").value = DEFAULTS.min_ndet;
-  $("sigma_max").value = DEFAULTS.sigma_max;
-  $("rising").checked = DEFAULTS.rising;
-  updateCmdPreview();
+  setControls(DEFAULTS);
+  applyFilters();
 }
 
-/* ------------------------------------------------------------ data loading */
+function refreshDirty() {
+  const dirty = applied && JSON.stringify(readParams()) !== JSON.stringify(applied);
+  $("applyBtn").classList.toggle("dirty", !!dirty);
+}
 
-/* Flags which filters can actually bite, but never disables a control -- a
-   dead-looking button is far more confusing than one that says why it did
-   nothing. */
-function markAvailability() {
-  available = {
-    days: headers.indexOf("firstmjd") !== -1,
-    min_ndet: headers.indexOf("ndet") !== -1,
-    sigma_max: headers.indexOf("nuclear_sigma") !== -1,
-    rising: headers.indexOf("is_rising") !== -1
+function updateCount() {
+  if (!loaded) { $("countText").textContent = ""; return; }
+  const fromScan = visible.filter(c => !extras.includes(c)).length;
+  let t = fromScan + " of " + candidates.length + " shown";
+  if (extras.length) t += " + " + extras.length + " added";
+  $("countText").textContent = t;
+}
+
+/* --------------------------------------------------------------- sidebar */
+
+function makeSourceItem(c) {
+  const item = el("div", "source-item" + (c.oid === activeOid ? " active" : ""));
+  item.dataset.oid = c.oid;
+  item.onclick = () => selectSource(c.oid);
+
+  const name = el("div", "name");
+  name.appendChild(document.createTextNode(c.oid));
+  const badge = (txt, cls, title) => {
+    const b = el("span", "badge " + cls, txt);
+    if (title) b.title = title;
+    name.appendChild(b);
   };
-  ["days", "min_ndet", "sigma_max", "rising"].forEach(function (key) {
-    var field = $("field-" + key);
-    if (field) field.classList.toggle("unavailable", !available[key]);
-  });
+  if (kept.some(k => k.oid === c.oid)) badge("kept", "kept");
+  if (c.manual || forced.has(c.oid)) badge("added", "added", "Added by hand");
+  if (c.gaia_agn === true) {
+    badge("AGN" + (c.gaia_agn_grade === "likely" ? "!" : "?"), "agn");
+  } else if (hasAgnColumn && c.gaia_agn === null) {
+    badge("no AGN check", "unk");
+  }
+  item.appendChild(name);
+
+  item.appendChild(el("div", "coords",
+    (c.ra !== null && c.dec !== null)
+      ? "RA " + c.ra.toFixed(4) + "  Dec " + c.dec.toFixed(4) : "no coords"));
+
+  const bits = [];
+  if (c.gr_color !== null) bits.push("g-r " + c.gr_color.toFixed(2));
+  if (c.nuclear_sigma !== null) bits.push(c.nuclear_sigma.toFixed(2) + "σ");
+  if (c.latest_mag !== null) bits.push("m " + c.latest_mag.toFixed(1));
+  if (bits.length || c.spec_z !== null) {
+    const line = el("div", "coords", bits.join("  |  "));
+    if (c.spec_z !== null) {
+      if (bits.length) line.appendChild(document.createTextNode("  |  "));
+      line.appendChild(el("span", "zfound", "z = " + fmtZ(c.spec_z)));
+    }
+    item.appendChild(line);
+  }
+  return item;
 }
 
-function loadCandidates() {
-  loaded = false;
-  shownCsv = null;
-  lastKeep = [];
-  $("saveBtn").disabled = true;
-  $("copyBtn").disabled = true;
-  showError("");
-  setStatus("loading", "Loading candidate table\u2026");
-  setPlaceholder("Loading\u2026");
-
-  /* Cache-bust: the Pages CDN will otherwise happily serve a stale CSV for
-     minutes after a scan commits a new one. */
-  fetch(CSV_FILE + "?t=" + Date.now(), { cache: "no-store" })
-    .then(function (r) {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.text();
-    })
-    .then(function (text) {
-      var lines = text.trim().split(/\r?\n/).filter(function (l) { return l.trim(); });
-      if (lines.length < 1) throw new Error("file is empty");
-
-      headers = splitCsvLine(lines[0]);
-      allRows = lines.slice(1).map(function (l) {
-        var cells = splitCsvLine(l), o = {};
-        headers.forEach(function (h, i) { o[h] = cells[i]; });
-        return o;
-      });
-      markAvailability();
-      loaded = true;
-
-      return fetch(STAMP_FILE + "?t=" + Date.now(), { cache: "no-store" })
-        .then(function (t) { return t.ok ? t.text() : ""; })
-        .catch(function () { return ""; });
-    })
-    .then(function (stamp) {
-      stamp = (stamp || "").trim();
-      setStatus("ok", stamp ? "Last scan: " + stamp : "Candidate table loaded");
-      $("countText").textContent =
-        allRows.length + " candidate" + (allRows.length === 1 ? "" : "s") + " available";
-      setPlaceholder("Loaded " + allRows.length + " candidate" +
-        (allRows.length === 1 ? "" : "s") + ". Set your filter values at left, then " +
-        "press \u201CApply filters\u201D to build the table.");
-    })
-    .catch(function (err) {
-      setStatus("error", "No candidate table");
-      $("countText").textContent = "";
-      showError("Could not load <code>" + CSV_FILE + "</code> (" + err.message +
-        "). This file is written by the <b>ZTF scan</b> workflow; if that has not " +
-        "run yet, go to the repository's Actions tab, choose <b>ZTF scan</b>, and " +
-        "press <b>Run workflow</b>.");
-      setPlaceholder("Nothing to show yet.");
-    });
+function appendGroup(parent, title, items, agnStyle) {
+  parent.appendChild(el("div", "group-header" + (agnStyle ? " agn" : ""),
+                        title + " (" + items.length + ")"));
+  if (items.length === 0) { parent.appendChild(el("div", "group-empty", "none")); return; }
+  items.forEach(c => parent.appendChild(makeSourceItem(c)));
 }
 
-/* --------------------------------------------------------------- filtering */
-
-function applyFilters() {
-  if (!loaded) {
-    showError("No candidate table is loaded, so there is nothing to filter yet. " +
-      "Press <b>Reload data</b> once the <b>ZTF scan</b> workflow has committed a " +
-      "<code>candidates.csv</code>.");
+function renderSourceList() {
+  const list = $("sourceList");
+  list.innerHTML = "";
+  if (!loaded && extras.length === 0) {
+    list.appendChild(el("div", "empty-msg", loadError || "Loading candidate table…"));
     return;
   }
-  showError("");
-  var p = readParams();
-  var mjdCut = nowMjd() - p.days;
-
-  lastKeep = allRows.filter(function (r) {
-    var sig, fm, nd;
-    if (available.sigma_max) {
-      sig = parseFloat(r.nuclear_sigma);
-      if (isFinite(sig) && sig > p.sigma_max) return false;
-    }
-    if (available.days) {
-      fm = parseFloat(r.firstmjd);
-      if (isFinite(fm) && fm < mjdCut) return false;
-    }
-    if (available.min_ndet) {
-      nd = parseFloat(r.ndet);
-      if (isFinite(nd) && nd < p.min_ndet) return false;
-    }
-    if (available.rising && p.rising && !isTrue(r.is_rising)) return false;
-    return true;
-  });
-
-  renderCurrent();
-}
-
-function renderCurrent() {
-  var rows = lastKeep.slice();
-
-  if (sortCol !== null && headers.indexOf(sortCol) !== -1) {
-    rows.sort(function (a, b) {
-      var av = a[sortCol], bv = b[sortCol];
-      var af = parseFloat(av), bf = parseFloat(bv), c;
-      if (isFinite(af) && isFinite(bf)) c = af - bf;
-      else c = String(av || "").localeCompare(String(bv || ""));
-      return sortDesc ? -c : c;
-    });
+  if (visible.length === 0) {
+    list.appendChild(el("div", "empty-msg", candidates.length === 0
+      ? "The latest scan found no candidates. You can still add a target by name above."
+      : "No candidates pass these filters. Try widening the discovery window, lowering the " +
+        "minimum detection count, loosening the nuclear tolerance or raising the magnitude limit, " +
+        "then press Apply."));
+    return;
   }
-
-  shownCsv = [headers.join(",")].concat(rows.map(function (r) {
-    return headers.map(function (h) { return csvCell(r[h]); }).join(",");
-  })).join("\n") + "\n";
-
-  renderTable(headers, rows);
-  $("countText").textContent =
-    rows.length + " of " + allRows.length + " candidate" +
-    (allRows.length === 1 ? "" : "s") + " shown";
-  $("saveBtn").disabled = rows.length === 0;
-  $("copyBtn").disabled = rows.length === 0;
-  updateCmdPreview();
+  if (!hasAgnColumn) { appendGroup(list, "Candidates", visible, false); return; }
+  appendGroup(list, "Not in Likely AGN", visible.filter(c => c.gaia_agn !== true), false);
+  appendGroup(list, "In Likely AGN", visible.filter(c => c.gaia_agn === true), true);
 }
 
-/* ----------------------------------------------------------------- table */
+/* Flat display order, so the arrow keys follow what's on screen. */
+function orderedCandidates() {
+  if (!hasAgnColumn) return visible;
+  return visible.filter(c => c.gaia_agn !== true).concat(visible.filter(c => c.gaia_agn === true));
+}
 
-function renderTable(cols, rows) {
-  var wrap = $("tableWrap");
-  if (rows.length === 0) {
-    setPlaceholder("No candidates pass these filters. Try widening the discovery " +
-      "window, lowering the minimum detection count, or loosening the nuclear " +
-      "tolerance.");
+/* ------------------------------------------------------------ add a target */
+
+function normaliseZtfName(raw) {
+  const s = raw.replace(/\s+/g, "");
+  return /^ztf/i.test(s) ? "ZTF" + s.slice(3).toLowerCase() : s;
+}
+
+function setAddMsg(text, isErr) {
+  const m = $("addMsg");
+  m.textContent = text;
+  m.classList.toggle("err", !!isErr);
+}
+
+async function addTarget() {
+  const raw = $("addName").value.trim();
+  if (!raw) return;
+  const name = normaliseZtfName(raw);
+  if (!ZTF_NAME_RE.test(name)) {
+    setAddMsg("Expected a ZTF name such as ZTF26abcdefg.", true);
     return;
   }
 
-  var table = document.createElement("table");
-  table.className = "results";
+  const existing = findCand(name);
+  if (existing) {
+    if (!extras.includes(existing)) forced.add(name);
+    $("addName").value = "";
+    applyFilters();
+    selectSource(name);
+    setAddMsg(name + " is already in the scan results" +
+              (visible.includes(existing) ? "." : ", but it is hidden by the filters."));
+    return;
+  }
 
-  var thead = document.createElement("thead");
-  var hr = document.createElement("tr");
-  cols.forEach(function (h) {
-    var th = document.createElement("th");
-    th.textContent = h;
-    if (h === sortCol) {
-      var a = document.createElement("span");
-      a.className = "arrow";
-      a.textContent = sortDesc ? "  \u25BC" : "  \u25B2";
-      th.appendChild(a);
+  /* Not in the scan: ask ALeRCE for its position so the Legacy Survey panel works. */
+  setAddMsg("Looking up " + name + " in ALeRCE…");
+  $("addBtn").disabled = true;
+  const obj = blankCandidate(name);
+  obj.manual = true;
+  let note = "";
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    const resp = await fetch(ALERCE_API + encodeURIComponent(name),
+                             { headers: { accept: "application/json" }, signal: ctl.signal });
+    clearTimeout(timer);
+    if (resp.status === 404) {
+      setAddMsg("ALeRCE has no object called " + name + ". Check the name.", true);
+      $("addBtn").disabled = false;
+      return;
     }
-    th.addEventListener("click", function () {
-      if (sortCol === h) { sortDesc = !sortDesc; }
-      else { sortCol = h; sortDesc = false; }
-      renderCurrent();
-    });
-    hr.appendChild(th);
-  });
-  thead.appendChild(hr);
-  table.appendChild(thead);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const j = await resp.json();
+    obj.ra = num(j.meanra !== undefined ? j.meanra : j.ra);
+    obj.dec = num(j.meandec !== undefined ? j.meandec : j.dec);
+    obj.firstmjd = num(j.firstmjd);
+    obj.ndet = num(j.ndet);
+    if (obj.ra === null || obj.dec === null) note = "ALeRCE returned no coordinates, so there is no Legacy Survey view.";
+  } catch (e) {
+    note = "Could not reach the ALeRCE API, so there is no Legacy Survey view for it.";
+  }
+  $("addBtn").disabled = false;
 
-  var tbody = document.createElement("tbody");
-  rows.forEach(function (r) {
-    var tr = document.createElement("tr");
-    cols.forEach(function (h) {
-      var td = document.createElement("td");
-      td.textContent = fmt(r[h]);
-      if (isTrue(r[h])) td.className = (h === "gaia_agn") ? "agn" : "true";
-      tr.appendChild(td);
+  extras.push(obj);
+  $("addName").value = "";
+  applyFilters();
+  selectSource(name);
+  setAddMsg("Added " + name + ". " + note, false);
+}
+
+/* --------------------------------------------------------------- viewers */
+
+function legacyUrl(ra, dec) {
+  const layer = $("lsLayer").value;
+  const mark = encodeURIComponent(ra.toFixed(6) + "," + dec.toFixed(6));
+  return "https://www.legacysurvey.org/viewer?ra=" + ra.toFixed(6) + "&dec=" + dec.toFixed(6) +
+         "&mark=" + mark + "&zoom=" + lsZoom + "&layer=" + layer;
+}
+
+/* Only touch an iframe's src when the target actually changed, so keeping a
+   source or applying filters doesn't reload the embedded pages. */
+function updateLegacyFrame() {
+  const c = findCand(activeOid);
+  const frame = $("legacyFrame"), ph = $("legacyPlaceholder"), tb = $("legacyToolbar");
+  $("zoomLabel").textContent = "z" + lsZoom;
+
+  if (!c || c.ra === null || c.dec === null) {
+    frame.style.display = "none";
+    frame.dataset.url = "";
+    tb.style.display = "none";
+    ph.style.display = "flex";
+    ph.textContent = c ? "No RA/Dec known for this source." : "Legacy Survey cutout will load here.";
+    return;
+  }
+  const url = legacyUrl(c.ra, c.dec);
+  if (frame.dataset.url !== url) { frame.src = url; frame.dataset.url = url; }
+  frame.style.display = "block";
+  ph.style.display = "none";
+  tb.style.display = "flex";
+  $("legacyExternal").href = url;
+}
+
+function bumpZoom(d) {
+  lsZoom = Math.max(8, Math.min(18, lsZoom + d));
+  updateLegacyFrame();
+}
+
+function selectSource(oid) {
+  const c = findCand(oid);
+  if (!c) return;
+  activeOid = oid;
+  renderSourceList();
+  const activeItem = $("sourceList").querySelector(".source-item.active");
+  if (activeItem) activeItem.scrollIntoView({ block: "nearest" });
+
+  const alerceUrl = "https://alerce.online/object/" + oid;
+  const af = $("alerceFrame");
+  if (af.dataset.oid !== oid) { af.src = alerceUrl; af.dataset.oid = oid; }
+  af.style.display = "block";
+  $("alercePlaceholder").style.display = "none";
+  $("alerceToolbar").style.display = "flex";
+  $("alerceExternal").href = alerceUrl;
+
+  updateLegacyFrame();
+
+  const coord = (c.ra !== null && c.dec !== null)
+    ? "  (RA " + c.ra.toFixed(5) + ", Dec " + c.dec.toFixed(5) + ")" : "";
+  const agn = c.gaia_agn === true
+    ? "  — Gaia AGN: " + (c.gaia_agn_grade || "match") +
+      (c.gaia_agn_prob !== null ? " (p=" + c.gaia_agn_prob.toFixed(2) + ")" : "") +
+      (c.gaia_agn_z !== null ? " z_qsoc=" + c.gaia_agn_z.toFixed(3) : "")
+    : "";
+  const zs = c.spec_z !== null ? "  — z = " + fmtZ(c.spec_z) + " (" + (c.spec_survey || "archival") + ")" : "";
+  $("currentSourceLabel").textContent = oid + coord + agn + zs;
+
+  const btn = $("keepBtn");
+  btn.disabled = false;
+  const isKept = kept.some(k => k.oid === oid);
+  btn.textContent = isKept ? "✓ Kept (click to remove)" : "Keep";
+  btn.classList.toggle("kept", isKept);
+}
+
+/* ------------------------------------------------------------ keep panel */
+
+function agnLabel(c) {
+  if (c.gaia_agn === true) return c.gaia_agn_grade === "likely" ? "likely" : "candidate";
+  if (c.gaia_agn === false) return "no";
+  return "unknown";
+}
+
+function toggleKeep() {
+  if (!activeOid) return;
+  const c = findCand(activeOid);
+  if (!c) return;
+  const idx = kept.findIndex(k => k.oid === activeOid);
+  if (idx >= 0) {
+    kept.splice(idx, 1);
+  } else {
+    const gaiaPrefill = c.gaia_agn_z !== null ? String(c.gaia_agn_z) : null;
+    kept.push({
+      oid: c.oid, ra: c.ra, dec: c.dec,
+      gaia_agn: agnLabel(c),
+      host_spectrum: c.has_archival_spec ? (c.spec_survey || "Other") : "None",
+      /* z_auto: redshift found automatically by the scan's archival-spectrum check.
+         When present it is shown as plain text; when absent the user gets a box. */
+      z_auto: c.spec_z,
+      z_auto_src: c.spec_survey || "archival spectrum",
+      spec_url: c.spec_url,
+      has_spec: c.has_archival_spec,
+      gaia_prefill: gaiaPrefill,
+      redshift: gaiaPrefill !== null ? gaiaPrefill : "",
+      comment: ""
     });
+  }
+  renderKeepTable();
+  selectSource(activeOid);
+}
+
+function removeKept(oid) {
+  kept = kept.filter(k => k.oid !== oid);
+  renderKeepTable();
+  if (activeOid) selectSource(activeOid); else renderSourceList();
+}
+
+function zSource(k) {
+  if (k.z_auto !== null) return k.z_auto_src;
+  const v = k.redshift.trim();
+  if (!v) return "";
+  return (k.gaia_prefill !== null && v === k.gaia_prefill) ? "Gaia QSOC" : "user";
+}
+
+/* Rows are built with the DOM API and the inputs mutate `kept` in place, so
+   typing never triggers a re-render (which would steal focus). */
+function renderKeepTable() {
+  const tbody = $("keepTbody");
+  const emptyMsg = $("emptyKeep");
+  tbody.innerHTML = "";
+  if (kept.length === 0) { emptyMsg.style.display = "block"; return; }
+  emptyMsg.style.display = "none";
+
+  kept.forEach(k => {
+    const tr = el("tr");
+    tr.appendChild(el("td", "mono", k.oid));
+    tr.appendChild(el("td", "mono", k.ra !== null ? k.ra.toFixed(5) : "—"));
+    tr.appendChild(el("td", "mono", k.dec !== null ? k.dec.toFixed(5) : "—"));
+
+    const tdAgn = el("td", "mono", k.gaia_agn);
+    if (k.gaia_agn === "likely") tdAgn.style.color = "var(--agn)";
+    tr.appendChild(tdAgn);
+
+    const tdSpec = el("td");
+    const sel = el("select", "box");
+    HOST_SPEC_OPTIONS.forEach(o => {
+      const opt = el("option", "", o);
+      opt.value = o;
+      if (o === k.host_spectrum) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.onchange = e => { k.host_spectrum = e.target.value; };
+    tdSpec.appendChild(sel);
+    tr.appendChild(tdSpec);
+
+    /* Redshift: auto-loaded text if the scan found one, otherwise a mint input box. */
+    const tdZ = el("td", "ztd");
+    if (k.z_auto !== null) {
+      let z;
+      if (k.spec_url) {
+        z = el("a", "zfound", fmtZ(k.z_auto));
+        z.href = k.spec_url; z.target = "_blank"; z.rel = "noopener";
+        z.title = "Open the spectrum";
+      } else {
+        z = el("span", "zfound", fmtZ(k.z_auto));
+      }
+      tdZ.appendChild(z);
+      tdZ.appendChild(el("span", "zsrc", k.z_auto_src));
+    } else {
+      const inp = el("input", "box z");
+      inp.type = "text"; inp.placeholder = "e.g. 0.075";
+      inp.inputMode = "decimal"; inp.value = k.redshift;
+      inp.oninput = e => { k.redshift = e.target.value; };
+      tdZ.appendChild(inp);
+      if (k.has_spec && k.spec_url) {
+        const a = el("a", "speclink", "spectrum ↗");
+        a.href = k.spec_url; a.target = "_blank"; a.rel = "noopener";
+        a.title = "A spectrum exists but no clean redshift was recorded for it " +
+                  "(ZWARN ≠ 0, or typed STAR). Inspect it and enter z by hand.";
+        tdZ.appendChild(a);
+      }
+    }
+    tr.appendChild(tdZ);
+
+    const tdC = el("td", "ctd");
+    const ta = el("textarea", "box comment");
+    ta.rows = 2; ta.maxLength = COMMENT_MAX; ta.placeholder = "Comment";
+    ta.value = k.comment;
+    const cc = el("div", "cc");
+    const updCc = () => { cc.textContent = ta.value.length + " / " + COMMENT_MAX; };
+    ta.oninput = () => { k.comment = ta.value; updCc(); };
+    updCc();
+    tdC.appendChild(ta);
+    tdC.appendChild(cc);
+    tr.appendChild(tdC);
+
+    const tdRm = el("td");
+    const btn = el("button", "remove-btn", "Remove");
+    btn.type = "button";
+    btn.onclick = () => removeKept(k.oid);
+    tdRm.appendChild(btn);
+    tr.appendChild(tdRm);
+
     tbody.appendChild(tr);
   });
-  table.appendChild(tbody);
-
-  wrap.innerHTML = "";
-  wrap.appendChild(table);
 }
 
-/* ---------------------------------------------------------------- saving */
+/* ---------------------------------------------------------------- export */
 
-function downloadCsv() {
-  if (!shownCsv) return;
-  var blob = new Blob([shownCsv], { type: "text/csv;charset=utf-8;" });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement("a");
+function csvCell(v) {
+  const s = (v === null || v === undefined) ? "" : String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function exportKeepCsv() {
+  if (kept.length === 0) {
+    alert("No sources in the follow-up list yet.");
+    return;
+  }
+  const header = ["oid", "ra", "dec", "gaia_agn", "host_spectrum", "redshift", "redshift_source", "comment"];
+  const lines = [header.join(",")];
+  kept.forEach(k => {
+    const z = k.z_auto !== null ? fmtZ(k.z_auto) : k.redshift.trim();
+    /* Line breaks in a comment become spaces so every record stays on one line. */
+    const comment = k.comment.replace(/\s*[\r\n]+\s*/g, " ").trim();
+    lines.push([
+      csvCell(k.oid),
+      csvCell(k.ra !== null ? k.ra.toFixed(6) : ""),
+      csvCell(k.dec !== null ? k.dec.toFixed(6) : ""),
+      csvCell(k.gaia_agn),
+      csvCell(k.host_spectrum),
+      csvCell(z),
+      csvCell(zSource(k)),
+      csvCell(comment)
+    ].join(","));
+  });
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  const blob = new Blob([lines.join("\n") + "\n"], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
   a.href = url;
-  a.download = "candidates_filtered.csv";
+  a.download = "followup_targets_" + stamp + ".csv";
   a.style.display = "none";
   document.body.appendChild(a);
   a.click();
   /* Firefox cancels the download if the object URL is revoked synchronously. */
-  setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1500);
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1500);
 }
 
-function copyCsv() {
-  if (!shownCsv) return;
-  var btn = $("copyBtn");
-  var done = function (msg) {
-    btn.textContent = msg;
-    setTimeout(function () { btn.textContent = "Copy CSV"; }, 1600);
-  };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(shownCsv)
-      .then(function () { done("Copied"); })
-      .catch(function () { done("Copy failed"); });
-  } else {
-    done("Copy failed");
+/* ------------------------------------------------------------- shortcuts */
+
+document.addEventListener("keydown", e => {
+  const t = e.target;
+  if (t && ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName)) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const list = orderedCandidates();
+  if (list.length === 0) return;
+  const i = list.findIndex(c => c.oid === activeOid);
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    selectSource(list[Math.min(list.length - 1, i + 1)].oid);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    selectSource(list[Math.max(0, i <= 0 ? 0 : i - 1)].oid);
+  } else if (e.key.toLowerCase() === "k" && activeOid) {
+    e.preventDefault();
+    toggleKeep();
   }
-}
+});
 
 /* ------------------------------------------------------------------ init */
 
-["days", "min_ndet", "sigma_max"].forEach(function (id) {
-  $(id).addEventListener("input", updateCmdPreview);
+["days", "min_ndet", "sigma_max", "max_mag"].forEach(id => {
+  $(id).addEventListener("input", refreshDirty);
+  $(id).addEventListener("keydown", e => { if (e.key === "Enter") applyFilters(); });
 });
-$("rising").addEventListener("change", updateCmdPreview);
+$("rising").addEventListener("change", refreshDirty);
 $("applyBtn").addEventListener("click", applyFilters);
 $("resetBtn").addEventListener("click", resetFilters);
-$("reloadBtn").addEventListener("click", loadCandidates);
-$("saveBtn").addEventListener("click", downloadCsv);
-$("copyBtn").addEventListener("click", copyCsv);
+$("addBtn").addEventListener("click", addTarget);
+$("addName").addEventListener("keydown", e => { if (e.key === "Enter") addTarget(); });
+$("keepBtn").addEventListener("click", toggleKeep);
+$("exportBtn").addEventListener("click", exportKeepCsv);
+$("lsLayer").addEventListener("change", updateLegacyFrame);
+$("zoomOut").addEventListener("click", () => bumpZoom(-1));
+$("zoomIn").addEventListener("click", () => bumpZoom(1));
 
-resetFilters();
+(function initFromQuery() {
+  const csvParam = new URLSearchParams(window.location.search).get("csv");
+  if (csvParam) csvFile = csvParam;
+})();
+
+setControls(DEFAULTS);
+renderKeepTable();
+renderSourceList();
 loadCandidates();
 </script>
 

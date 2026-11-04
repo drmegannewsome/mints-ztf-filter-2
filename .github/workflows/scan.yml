@@ -50,6 +50,31 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # ---- Stage 6 support: DESI catalog for the archival-spectra check -------
+      # Deliberately soft-fail: if any of these three steps breaks, the scan
+      # still runs and simply leaves the spec_* columns blank (spec_checked=False).
+      - name: Install fitsio (archival-spectra check)
+        continue-on-error: true
+        run: pip install -r requirements-spectra.txt
+
+      - name: Restore DESI catalog cache
+        id: desi-cache
+        uses: actions/cache@v4
+        with:
+          path: spectra_finding/data/agngal_desi.fits
+          key: desi-dr1-agngal-v1.0
+
+      - name: Download DESI DR1 AGN/Galaxy VAC (first run / cache miss only)
+        if: steps.desi-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p spectra_finding/data
+          curl -fL --retry 5 --retry-delay 15 \
+               -o spectra_finding/data/agngal_desi.fits.part \
+               https://data.desi.lbl.gov/public/dr1/vac/dr1/agngal/v1.0/agngal_desi.fits
+          mv spectra_finding/data/agngal_desi.fits.part spectra_finding/data/agngal_desi.fits
+          ls -l spectra_finding/data/
+
       - name: Run scan
         env:
           # The `||` fallbacks supply the scheduled-run values, since `inputs`
@@ -67,6 +92,7 @@ jobs:
                 --sigma-max "$SIGMA_MAX"
                 --workers 8
                 --rate 5
+                --spec-vac spectra_finding/data/agngal_desi.fits
                 --out docs/candidates.csv)
           if [ "$RISING" = "true" ]; then ARGS+=(--rising); fi
           if [ -n "$MAX_OBJECTS" ]; then ARGS+=(--max-objects "$MAX_OBJECTS"); fi

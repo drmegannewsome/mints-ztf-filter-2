@@ -1,0 +1,6 @@
+# DESI catalog used by the Stage 6 archival-spectra check -- far too big for git.
+# The scan workflow downloads and caches it itself.
+spectra_finding/data/
+
+__pycache__/
+*.pyc

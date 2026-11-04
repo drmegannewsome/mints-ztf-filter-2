@@ -19,6 +19,10 @@ Pipeline (cheap/bulk filters first, expensive per-object ones last):
                        g/r epochs, keep objects with >=3 matched epochs.
   Stage 3   Blue     : weighted-mean g-r over the 3 latest matched epochs < -0.05.
   Stage 4   Nuclear  : iinuclear on the survivors; keep those within `sigma_max`.
+  Stage 5   Gaia AGN : informational Gaia DR3 QSO-candidate flag (never a cut).
+  Stage 6   Spectra  : informational archival-spectrum check of the final candidates
+                       against the DESI DR1 AGN/Galaxy VAC, via
+                       spectra_finding/desi_agngal_crossmatch.py (never a cut).
 
 A g/r "epoch" = a g and r measurement within 2 days of each other. Rise/fall
 compares the latest epoch against the weighted mean of the prior 2.
@@ -27,6 +31,7 @@ Inspired by FLEET (Gomez et al.): https://github.com/gmzsebastian/fleet
 Nuclear test via iinuclear:        https://github.com/gmzsebastian/iinuclear
 
 Requirements:  pip install alerce iinuclear numpy pandas astropy astroquery matplotlib
+               pip install fitsio     # only for the Stage 6 archival-spectra check
 
 CLI examples:
     python early_color_classifier.py --days 60 --min-ndet 5 --workers 1
@@ -35,6 +40,7 @@ CLI examples:
 """
 
 import os
+import sys
 import time
 import threading
 import contextlib
@@ -107,6 +113,12 @@ GAIA_PROXIMITY_MAXMAG = 19.0   # ...only if that Gaia source is at least this br
 # Gaia DR3 QSO-candidate annotation (Stage 5; informational, never a cut)
 GAIA_AGN_MATCH_RADIUS_ARCSEC = 2.0
 GAIA_AGN_MIN_PROB = 0.25        # 0 = flag any qso_candidates match; raise to purify
+
+# Archival host spectra (Stage 6; informational, never a cut)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+SPEC_DIR = os.path.join(_HERE, "spectra_finding")
+SPEC_VAC_DEFAULT = os.path.join(SPEC_DIR, "data", "agngal_desi.fits")   # git-ignored
+SPEC_MATCH_RADIUS_ARCSEC = 2.0   # vs DESI TARGET_RA/DEC; ZTF positions are good to ~<1"
 
 # Index of catalog_result in get_data()'s return; ras/decs are 0,1.
 CATALOG_INDEX = 4
@@ -749,6 +761,108 @@ def gaia_agn_flag(ra, dec, radius_arcsec=GAIA_AGN_MATCH_RADIUS_ARCSEC,
     }
     return is_agn, info
 
+
+# --------------------------------------------------------------------------- #
+#  Stage 6: archival host spectra (DESI DR1 AGN/Galaxy VAC)
+# --------------------------------------------------------------------------- #
+# Wraps spectra_finding/desi_agngal_crossmatch.py. Informational only: it never
+# removes a candidate, and any failure (no catalog file, no fitsio, ...) leaves
+# the columns blank with spec_checked=False, so the review page can tell "not
+# checked" apart from "checked, nothing found".
+#
+# Caveat: this is a match against the AGN/Galaxy *value-added catalog*, which is
+# a subset of DESI DR1. "No match" therefore means "not in that VAC", not "DESI
+# never observed it".
+
+SPEC_COLUMNS = ["spec_checked", "has_archival_spec", "spec_survey", "spec_type",
+                "spec_z", "spec_zwarn", "spec_sep_arcsec", "spec_targetid",
+                "spec_n_matches", "spec_url"]
+
+
+def _import_desi_crossmatch():
+    if SPEC_DIR not in sys.path:
+        sys.path.insert(0, SPEC_DIR)
+    import desi_agngal_crossmatch as xm      # imports fitsio at module level
+    return xm
+
+
+def _unrounded_z(vac_path, vac_row, fallback):
+    """desi_agngal_crossmatch rounds Z to 3 dp; re-read that one row for the
+    full-precision value (same pattern as its own line_measurements())."""
+    try:
+        import fitsio
+        z = float(fitsio.read(vac_path, rows=[int(vac_row)], columns=["Z"], ext=1)[0]["Z"])
+        return z if np.isfinite(z) else fallback
+    except Exception:
+        return fallback
+
+
+def desi_archival_spectrum(ra, dec, xm, vac_path, radius_arcsec=SPEC_MATCH_RADIUS_ARCSEC):
+    """Look up one position; returns a dict keyed by SPEC_COLUMNS.
+
+    The whole VAC is searched (select=None), so SV spectra, repeat observations
+    and ZWARN != 0 rows still count as "has a spectrum". The redshift, though, is
+    only reported from a clean row (ZWARN == 0, finite Z, SPECTYPE != STAR), the
+    nearest one if there are several; otherwise spec_z stays blank.
+    """
+    out = dict.fromkeys(SPEC_COLUMNS)
+    out["spec_checked"] = True
+    matches = xm.crossmatch_desi(ra, dec, radius_arcsec, select=None,
+                                 verbose=False, path=vac_path)
+    if not matches:
+        out["has_archival_spec"] = False
+        return out
+    clean = [m for m in matches
+             if m["ZWARN"] == 0 and m["Z"] is not None and m["SPECTYPE"] != "STAR"]
+    best = (clean or matches)[0]             # matches come back sorted by separation
+    out.update(has_archival_spec=True, spec_survey="DESI",
+               spec_type=best["SPECTYPE"], spec_zwarn=best["ZWARN"],
+               spec_sep_arcsec=round(best["separation_arcsec"], 3),
+               spec_targetid=best["TARGETID"], spec_n_matches=len(matches),
+               spec_url=best["SPECTRUM_URL"])
+    if clean:
+        out["spec_z"] = round(_unrounded_z(vac_path, best["VAC_ROW"], best["Z"]), 5)
+    return out
+
+
+def annotate_archival_spectra(finalists, vac_path=None, radius_arcsec=SPEC_MATCH_RADIUS_ARCSEC):
+    """Stage 6: add the SPEC_COLUMNS to each finalist, in place. Sequential on
+    purpose -- the crossmatch module keeps its catalog in module globals."""
+    for s in finalists:
+        for c in SPEC_COLUMNS:
+            s.setdefault(c, None)
+        s["spec_checked"] = False
+    if not finalists:
+        return
+
+    vac_path = vac_path or os.environ.get("DESI_AGNGAL_VAC") or SPEC_VAC_DEFAULT
+    try:
+        if not os.path.exists(vac_path):
+            raise FileNotFoundError(f"DESI VAC not found at {vac_path}")
+        xm = _import_desi_crossmatch()
+        xm.load_agngal(path=vac_path, select=None, verbose=False)
+    except Exception as exc:
+        print(f"Stage 6  spectra : SKIPPED ({type(exc).__name__}: {exc}); "
+              f"spec_* columns left blank")
+        return
+
+    n_spec = n_z = n_fail = 0
+    for s in finalists:
+        if not (np.isfinite(s["ra"]) and np.isfinite(s["dec"])):
+            n_fail += 1
+            continue
+        try:
+            s.update(desi_archival_spectrum(s["ra"], s["dec"], xm, vac_path, radius_arcsec))
+        except Exception as exc:
+            n_fail += 1
+            print(f"    [archival-spectrum check failed for {s['oid']}: {exc}]")
+            continue
+        n_spec += bool(s["has_archival_spec"])
+        n_z += s["spec_z"] is not None
+    print(f"Stage 6  spectra : {n_spec}/{len(finalists)} have a DESI VAC spectrum within "
+          f"{radius_arcsec:g}\" ({n_z} with a clean redshift, {n_fail} not checked)")
+
+
 # --------------------------------------------------------------------------- #
 #  Optional plotting
 # --------------------------------------------------------------------------- #
@@ -790,6 +904,7 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
              use_forced=True, sigma_max=NUCLEAR_SIGMA_MAX, workers=1, rate=5.0,
              flag_agn=True, agn_radius=GAIA_AGN_MATCH_RADIUS_ARCSEC,
              agn_min_prob=GAIA_AGN_MIN_PROB,
+             check_spectra=True, spec_vac=None, spec_radius=SPEC_MATCH_RADIUS_ARCSEC,
              plotdir=None, client=None):
     if client is None:
         client = Alerce()
@@ -883,6 +998,11 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
               f"candidate within {agn_radius:g}\" ({n_likely} graded 'likely', "
               f"{n_unk} undetermined)")
 
+    # Stage 6: archival host spectra -- informational only. Runs last, so it only
+    # ever sees candidates that survived every cut above (incl. --rising).
+    if check_spectra:
+        annotate_archival_spectra(finalists, spec_vac, spec_radius)
+
     if plotdir and finalists:
         os.makedirs(plotdir, exist_ok=True)
         for s in finalists:
@@ -893,13 +1013,20 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
 
 
 def results_table(finalists):
+    # latest_mag = combined g/r *difference-image* magnitude of the latest matched
+    # epoch (the review page's "latest epoch brighter than" cut).
     cols = ["oid", "ra", "dec", "firstmjd", "ndet", "n_matched_epochs", "gr_color", "is_blue",
-            "is_rising", "delta_mag", "is_star", "gaia_pm_sig", "gaia_plx_sig",
+            "is_rising", "delta_mag", "latest_mag", "is_star", "gaia_pm_sig", "gaia_plx_sig",
             "nuclear_sigma", "nuclear_pvalue", "is_nuclear",
             "gaia_agn", "gaia_agn_grade", "gaia_agn_prob",
-            "gaia_agn_sep_arcsec", "gaia_agn_z"]
+            "gaia_agn_sep_arcsec", "gaia_agn_z"] + SPEC_COLUMNS
     rows = [{c: s.get(c) for c in cols} for s in finalists]
-    return pd.DataFrame(rows, columns=cols)
+    df = pd.DataFrame(rows, columns=cols)
+    # DESI TARGETIDs are ~4e16 (> 2**53): pandas would turn an int column with
+    # blanks into float64 and silently corrupt them. Keep these as nullable ints.
+    for c in ("spec_targetid", "spec_zwarn", "spec_n_matches"):
+        df[c] = pd.array([r.get(c) for r in rows], dtype="Int64")
+    return df
 
 
 # --------------------------------------------------------------------------- #
@@ -977,7 +1104,14 @@ if __name__ == "__main__":
     p.add_argument("--agn-min-prob", type=float, default=GAIA_AGN_MIN_PROB,
                    help="require classprob_dsc_combmod_quasar >= this for 'candidate'-grade "
                         "matches to count as AGN (default 0 = any match counts)")
-    
+    p.add_argument("--no-spec-check", action="store_true",
+                   help="skip the Stage 6 archival-spectrum check (DESI VAC) of final candidates")
+    p.add_argument("--spec-vac", default=None, metavar="FITS",
+                   help="path to agngal_desi.fits (default: $DESI_AGNGAL_VAC, else "
+                        "spectra_finding/data/agngal_desi.fits)")
+    p.add_argument("--spec-radius", type=float, default=SPEC_MATCH_RADIUS_ARCSEC,
+                   help="match radius in arcsec for the archival-spectrum check (default 2.0)")
+
     args = p.parse_args()
 
     if args.target:
@@ -991,6 +1125,8 @@ if __name__ == "__main__":
                              sigma_max=args.sigma_max, workers=args.workers, rate=args.rate,
                              flag_agn=not args.no_agn_flag, agn_radius=args.agn_radius,
                              agn_min_prob=args.agn_min_prob,
+                             check_spectra=not args.no_spec_check, spec_vac=args.spec_vac,
+                             spec_radius=args.spec_radius,
                              plotdir=args.plotdir if args.plot else None)
         table = results_table(finalists)
         print("\n=== Final candidates (blue + non-stellar + non-CV + nuclear) ===")
