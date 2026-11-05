@@ -16,10 +16,10 @@ on:
         options: ["4", "5", "8", "12", "20"]
         default: "4"
       sigma_max:
-        description: "Nuclear tolerance in sigma (--sigma-max) — does NOT affect runtime"
+        description: "Nuclear tolerance in sigma (--sigma-max) — does NOT affect runtime; sigmas are cached, so changing it never re-runs iinuclear"
         type: choice
         options: ["0.5", "1.0", "1.5", "2.0", "3.0"]
-        default: "1.0"
+        default: "2.0"
       rising:
         description: "Require rising (--rising)"
         type: boolean
@@ -76,13 +76,14 @@ jobs:
           ls -l spectra_finding/data/
 
       - name: Run scan
+        id: scan
         env:
           # The `||` fallbacks supply the scheduled-run values, since `inputs`
           # is empty on a cron trigger. Keep them in step with the dispatch
           # defaults above.
           DAYS:        ${{ inputs.days        || '60'  }}
           MIN_NDET:    ${{ inputs.min_ndet    || '4'   }}
-          SIGMA_MAX:   ${{ inputs.sigma_max   || '1.0' }}   # runtime-neutral; raise to keep more rows
+          SIGMA_MAX:   ${{ inputs.sigma_max   || '2.0' }}   # runtime-neutral; raise to keep more rows
           RISING:      ${{ inputs.rising      || 'false' }}
           MAX_OBJECTS: ${{ inputs.max_objects || ''    }}
         run: |
@@ -92,6 +93,8 @@ jobs:
                 --sigma-max "$SIGMA_MAX"
                 --workers 8
                 --rate 5
+                --max-minutes 200
+                --state state/scan_state.json
                 --spec-vac spectra_finding/data/agngal_desi.fits
                 --out docs/candidates.csv)
           if [ "$RISING" = "true" ]; then ARGS+=(--rising); fi
@@ -99,17 +102,25 @@ jobs:
           echo "+ python -u ztf_filter_6000.py ${ARGS[*]}"
           python -u ztf_filter_6000.py "${ARGS[@]}"
 
+      # `!cancelled()` rather than the default success(): if the scan stops early
+      # (time budget, nothing finished) its per-object progress in state/ is still banked.
       - name: Stamp the run
+        if: ${{ !cancelled() }}
         run: |
           {
             date -u +"%Y-%m-%dT%H:%M:%SZ"
-            echo "days=${{ inputs.days || '60' }} min_ndet=${{ inputs.min_ndet || '4' }} sigma_max=${{ inputs.sigma_max || '1.0' }} rising=${{ inputs.rising || 'false' }}"
+            echo "days=${{ inputs.days || '60' }} min_ndet=${{ inputs.min_ndet || '4' }} sigma_max=${{ inputs.sigma_max || '2.0' }} rising=${{ inputs.rising || 'false' }}"
+            echo "scan step: ${{ steps.scan.outcome }}"
+            if [ -f scan_partial.txt ]; then cat scan_partial.txt; fi
           } > docs/last_run.txt
 
       - name: Commit results
+        if: ${{ !cancelled() }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/candidates.csv docs/last_run.txt
+          if [ -f state/scan_state.json ]; then git add state/scan_state.json; fi
           git diff --staged --quiet || git commit -m "Automated ZTF scan $(date -u +%F)"
+          git pull --rebase
           git push

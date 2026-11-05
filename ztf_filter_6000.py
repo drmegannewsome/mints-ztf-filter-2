@@ -24,6 +24,11 @@ Pipeline (cheap/bulk filters first, expensive per-object ones last):
                        against the DESI DR1 AGN/Galaxy VAC, via
                        spectra_finding/desi_agngal_crossmatch.py (never a cut).
 
+Memory: verdicts are cached per object in state/scan_state.json (see ScanState), so a
+daily run only screens objects it has not decided yet and merely refreshes the photometry
+of the candidates it is already tracking. Objects that are not blue, or not nuclear, are
+never re-screened.
+
 A g/r "epoch" = a g and r measurement within 2 days of each other. Rise/fall
 compares the latest epoch against the weighted mean of the prior 2.
 
@@ -41,16 +46,37 @@ CLI examples:
 
 import os
 import sys
+import json
 import time
 import threading
 import contextlib
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import numpy as np
 import pandas as pd
+import requests
 from astropy.time import Time
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+
+# --------------------------------------------------------------------------- #
+#  Network timeouts. The alerce client calls session.request(...) with NO
+#  timeout, so one stalled response hangs its worker thread forever -- and the
+#  thread pool then waits for it forever. Give every requests call that doesn't
+#  set its own timeout a (connect, read) limit; a timeout is treated as a
+#  transient error by _with_retries below.
+# --------------------------------------------------------------------------- #
+REQUEST_TIMEOUT = (10, 90)          # seconds: (connect, read)
+MAST_TIMEOUT = 120                  # astroquery's MAST default is 600 s per request
+
+_orig_session_request = requests.Session.request
+
+def _request_with_timeout(self, method, url, **kwargs):
+    if kwargs.get("timeout") is None:
+        kwargs["timeout"] = REQUEST_TIMEOUT
+    return _orig_session_request(self, method, url, **kwargs)
+
+requests.Session.request = _request_with_timeout
 
 from alerce.core import Alerce
 try:
@@ -80,6 +106,12 @@ def _json_to_table_safe(json_obj, *args, **kwargs):
     return _orig_json_to_table(json_obj, *args, **kwargs)
 
 _mast_svc._json_to_table = _json_to_table_safe
+
+try:
+    from astroquery.mast import conf as _mast_conf
+    _mast_conf.timeout = MAST_TIMEOUT
+except Exception:
+    pass
 
 from astroquery.gaia import Gaia
 from iinuclear.utils import get_data, get_galaxy_center, check_nuclear
@@ -216,27 +248,78 @@ def _get_client():
     return _thread_local.client
 
 
-def _parallel_map(func, items, workers, on_error=None):
+_T0 = time.monotonic()
+_PARTIAL = []          # one note per stage that was cut short by its time budget
+
+
+def _stage(msg):
+    """print() with minutes elapsed since the scan started, flushed immediately,
+    so a stalled run's log shows exactly where the time went."""
+    print(f"[{(time.monotonic() - _T0) / 60:6.1f} min] {msg}", flush=True)
+
+
+def _parallel_map(func, items, workers, on_error=None, label="objects",
+                  budget_min=None, heartbeat=60.0):
     """Apply func(item) across items with `workers` threads (I/O-bound); returns
-    (item, result) pairs for calls that didn't raise. workers<=1 is sequential."""
-    results = []
+    (item, result) pairs for calls that didn't raise. workers<=1 is sequential.
+
+    Prints a progress line every `heartbeat` s. If `budget_min` is set and runs
+    out, the unfinished items are abandoned (their threads are left to die with
+    the process), the stage is recorded in _PARTIAL, and what finished is returned."""
+    items = list(items)
+    results, done = [], 0
+    deadline = time.monotonic() + budget_min * 60 if budget_min else None
+    last_beat = time.monotonic()
+
+    def _handle(it, exc=None, value=None):
+        if exc is not None:
+            if on_error:
+                on_error(it, exc)
+        else:
+            results.append((it, value))
+
+    def _cut_short():
+        _PARTIAL.append(f"{label}: {len(items) - done} of {len(items)} unfinished")
+        _stage(f"   !! {label}: time budget ({budget_min:g} min) reached with "
+               f"{done}/{len(items)} done; continuing with what finished")
+
     if workers and workers > 1:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(func, it): it for it in items}
-            for fut in as_completed(futures):
-                it = futures[fut]
-                try:
-                    results.append((it, fut.result()))
-                except Exception as exc:
-                    if on_error:
-                        on_error(it, exc)
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = {pool.submit(func, it): it for it in items}
+        pending = set(futures)
+        try:
+            while pending:
+                left = None if deadline is None else deadline - time.monotonic()
+                if left is not None and left <= 0:
+                    _cut_short()
+                    break
+                finished, pending = wait(pending, return_when=FIRST_COMPLETED,
+                                         timeout=heartbeat if left is None else min(heartbeat, left))
+                for fut in finished:
+                    done += 1
+                    it = futures[fut]
+                    try:
+                        _handle(it, value=fut.result())
+                    except Exception as exc:
+                        _handle(it, exc=exc)
+                if time.monotonic() - last_beat >= heartbeat:
+                    last_beat = time.monotonic()
+                    _stage(f"   {label}: {done}/{len(items)} done")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     else:
         for it in items:
+            if deadline is not None and time.monotonic() > deadline:
+                _cut_short()
+                break
             try:
-                results.append((it, func(it)))
+                _handle(it, value=func(it))
             except Exception as exc:
-                if on_error:
-                    on_error(it, exc)
+                _handle(it, exc=exc)
+            done += 1
+            if time.monotonic() - last_beat >= heartbeat:
+                last_beat = time.monotonic()
+                _stage(f"   {label}: {done}/{len(items)} done")
     return results
 
 
@@ -842,7 +925,7 @@ def annotate_archival_spectra(finalists, vac_path=None, radius_arcsec=SPEC_MATCH
         xm = _import_desi_crossmatch()
         xm.load_agngal(path=vac_path, select=None, verbose=False)
     except Exception as exc:
-        print(f"Stage 6  spectra : SKIPPED ({type(exc).__name__}: {exc}); "
+        _stage(f"Stage 6  spectra : SKIPPED ({type(exc).__name__}: {exc}); "
               f"spec_* columns left blank")
         return
 
@@ -859,7 +942,7 @@ def annotate_archival_spectra(finalists, vac_path=None, radius_arcsec=SPEC_MATCH
             continue
         n_spec += bool(s["has_archival_spec"])
         n_z += s["spec_z"] is not None
-    print(f"Stage 6  spectra : {n_spec}/{len(finalists)} have a DESI VAC spectrum within "
+    _stage(f"Stage 6  spectra : {n_spec}/{len(finalists)} have a DESI VAC spectrum within "
           f"{radius_arcsec:g}\" ({n_z} with a clean redshift, {n_fail} not checked)")
 
 
@@ -897,6 +980,145 @@ def plot_lightcurve(result, savepath=None):
 
 
 # --------------------------------------------------------------------------- #
+#  Persistent per-object state: each daily run only does NEW work
+# --------------------------------------------------------------------------- #
+# One record per ALeRCE object, kept in a small JSON file that the workflow
+# commits back to the repo (so it survives between runs):
+#   "few"    fewer than MIN_EPOCHS matched g/r epochs. Re-screened only when ndet grows.
+#   "red"    not blue (or stopped being blue). Never re-screened.
+#   "nuc"    blue and iinuclear has been run; the sigma is stored, so the cut is applied
+#            when the file is READ. Beyond sigma_max -> never re-screened. Within it ->
+#            a tracked candidate: only its photometry is refreshed each day (colour,
+#            rise, latest mag); nuclear / Gaia-AGN / spectrum results are reused.
+#   "nohost" iinuclear returned nothing (no host catalogue, or an error); retried up to
+#            NUC_MAX_ATTEMPTS times, then parked.
+# Records are dropped once their first detection is older than STATE_KEEP_DAYS.
+STATE_VERSION = 1
+STATE_DEFAULT = os.path.join(_HERE, "state", "scan_state.json")
+NUC_MAX_ATTEMPTS = 3
+STATE_KEEP_DAYS = MAX_AGE_DAYS + 10
+CACHED_KEYS = (("is_nuclear", "nuclear_pvalue", "nuclear_sigma", "gaia_agn", "gaia_agn_grade",
+                "gaia_agn_prob", "gaia_agn_sep_arcsec", "gaia_agn_z") + tuple(SPEC_COLUMNS))
+
+
+def _state_params(use_forced):
+    """Settings a cached verdict depends on. If any differ, the file is not reused."""
+    return {"blue": COLOR_BLUE_THRESHOLD, "min_epochs": MIN_EPOCHS, "n_color": N_COLOR_EPOCHS,
+            "match_days": GR_MATCH_WINDOW_DAYS, "forced": bool(use_forced)}
+
+
+def _clean(v):
+    """JSON-safe copy: numpy scalars -> Python, NaN/inf/NA -> None. Python ints stay
+    exact (DESI TARGETIDs are > 2**53, so they must never pass through a float)."""
+    if v is None or v is pd.NA:
+        return None
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        f = float(v)
+        return f if np.isfinite(f) else None
+    if isinstance(v, dict):
+        return {str(k): _clean(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_clean(x) for x in v]
+    return v if isinstance(v, str) else str(v)
+
+
+class ScanState:
+    def __init__(self, path, params):
+        self.path, self.params = path, params
+        self.rec = {}
+        self.readonly = False        # True: use nothing from disk AND never overwrite it
+
+    @classmethod
+    def load(cls, path, params, reset=False):
+        st = cls(path, params)
+        if not path:
+            return st
+        if reset or not os.path.exists(path):
+            _stage("State    : " + ("reset requested; starting empty" if reset
+                                    else f"no state file yet ({path}); this run screens everything"))
+            return st
+        try:
+            with open(path) as fh:
+                doc = json.load(fh)
+        except Exception as exc:
+            _stage(f"State    : {path} unreadable ({type(exc).__name__}: {exc}); starting empty "
+                   f"(it will be rewritten)")
+            return st
+        if doc.get("version") != STATE_VERSION or doc.get("params") != params:
+            st.readonly = True
+            _stage(f"State    : {path} was built with different settings "
+                   f"({doc.get('params')} vs {params}); ignoring it and NOT overwriting it")
+            return st
+        st.rec = doc.get("records", {})
+        _stage(f"State    : loaded {len(st.rec)} object verdicts from {path}")
+        return st
+
+    def save(self, now_mjd):
+        if not self.path or self.readonly:
+            return
+        cutoff = now_mjd - STATE_KEEP_DAYS
+        self.rec = {o: r for o, r in self.rec.items()
+                    if r.get("fm") is None or r["fm"] >= cutoff}
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        lines = [f'{json.dumps(o)}:{json.dumps(self.rec[o], separators=(",", ":"), sort_keys=True)}'
+                 for o in sorted(self.rec)]
+        head = '{"version":%d,"params":%s,"records":{\n' % (
+            STATE_VERSION, json.dumps(self.params, sort_keys=True))
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write(head + ",\n".join(lines) + "\n}}\n")
+        os.replace(tmp, self.path)
+
+    def mark(self, oid, status, ndet, firstmjd, now_mjd, **extra):
+        r = {"s": status, "nd": _clean(ndet), "fm": _clean(firstmjd), "chk": round(float(now_mjd), 2)}
+        r.update({k: _clean(v) for k, v in extra.items()})
+        self.rec[oid] = r
+
+    def put_candidate(self, s, now_mjd, sigma_max):
+        """Record a blue object whose nuclear test has been run. Beyond sigma_max only
+        the nuclear numbers are kept; within it, the full output row."""
+        row = {k: v for k, v in s.items() if not k.startswith("_")}
+        if s.get("nuclear_sigma") is None or s["nuclear_sigma"] > sigma_max:
+            row = {k: row.get(k) for k in ("is_nuclear", "nuclear_pvalue", "nuclear_sigma")}
+        self.mark(s["oid"], "nuc", s.get("ndet"), s.get("firstmjd"), now_mjd, c=_clean(row))
+
+    def plan(self, oids, meta, now_mjd, sigma_max, recheck_not_blue_days=0):
+        """Split today's survivors into `work` (never decided, or worth another look)
+        and `track` (candidates whose photometry is refreshed). Everything else is
+        skipped. `meta[oid] = (firstmjd, ndet)`. Returns (work, track, skipped_counts)."""
+        work, track, skipped = [], [], {}
+
+        def skip(why):
+            skipped[why] = skipped.get(why, 0) + 1
+
+        for oid in oids:
+            r = self.rec.get(oid)
+            fm, nd = meta.get(oid, (np.nan, np.nan))
+            if r is None:
+                work.append(oid)
+                continue
+            grew = bool(np.isfinite(nd)) and nd > (r.get("nd") or 0)
+            st = r.get("s")
+            if st == "few":
+                work.append(oid) if grew else skip("too few epochs, no new detections")
+            elif st == "red":
+                young = bool(np.isfinite(fm)) and (now_mjd - fm) < recheck_not_blue_days
+                work.append(oid) if (recheck_not_blue_days > 0 and young and grew) else skip("not blue")
+            elif st == "nohost":
+                work.append(oid) if r.get("n", 0) < NUC_MAX_ATTEMPTS else skip("no host (parked)")
+            elif st == "nuc":
+                sg = (r.get("c") or {}).get("nuclear_sigma")
+                track.append(oid) if (sg is not None and sg <= sigma_max) else skip("not nuclear")
+            else:
+                work.append(oid)
+        return work, track, skipped
+
+
+# --------------------------------------------------------------------------- #
 #  Full scan
 def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
              require_rising=False, reject_stars=True, reject_cvnova=True,
@@ -905,15 +1127,36 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
              flag_agn=True, agn_radius=GAIA_AGN_MATCH_RADIUS_ARCSEC,
              agn_min_prob=GAIA_AGN_MIN_PROB,
              check_spectra=True, spec_vac=None, spec_radius=SPEC_MATCH_RADIUS_ARCSEC,
-             plotdir=None, client=None):
+             max_minutes=0, plotdir=None, client=None,
+             state_path=None, reset_state=False, recheck_not_blue_days=0):
+    """state_path: JSON file of per-object verdicts (see ScanState). With it, only
+    objects not yet decided are screened and tracked candidates just get fresh
+    photometry. None = stateless (screen everything, as before).
+
+    max_minutes: wall-clock limit for the whole per-object work (0 = none). It exists
+    so a cold start with a big backlog stops cleanly, SAVES its progress and lets the
+    next run continue -- not to hide slow runs. Newest objects are screened first."""
     if client is None:
         client = Alerce()
     global _RATE_LIMITER
     _RATE_LIMITER = _RateLimiter(rate)
+    t_start = time.monotonic()
 
+    def bud(reserve_frac):
+        """Minutes this stage may still use, keeping `reserve_frac` of the total for
+        the stages after it. Time a stage doesn't use rolls on to the next one."""
+        if not max_minutes:
+            return None
+        used = (time.monotonic() - t_start) / 60
+        return max(max_minutes * (1 - reserve_frac) - used, 0.05)
+
+    now_mjd = Time.now().mjd
+    state = ScanState.load(state_path, _state_params(use_forced), reset=reset_state)
+
+    _stage("Stage 1  recency : querying ALeRCE...")
     recent = query_recent_discoveries(client, days, min_ndet, max_objects)
-    print(f"Stage 1  recency : {len(recent)} transients found in last {days:.0f} d "
-          f"(ndet>={min_ndet})")
+    _stage(f"Stage 1  recency : {len(recent)} transients found in last {days:.0f} d "
+           f"(ndet>={min_ndet})")
     if workers > 1:
         print(f"         (using {workers} worker threads for photometry/nuclear)")
 
@@ -923,91 +1166,155 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
                                    classifier=cvnova_classifier, probability=cvnova_prob)
         before = len(recent)
         recent = recent[~recent["oid"].isin(cvnova)].reset_index(drop=True)
-        print(f"Stage 1a CV/Nova : removed {before - len(recent)} CV/Nova "
-              f"(p>={cvnova_prob}); {len(recent)} remain")
+        _stage(f"Stage 1a CV/Nova : removed {before - len(recent)} CV/Nova "
+               f"(p>={cvnova_prob}); {len(recent)} remain")
 
     # Stage 1b: reject stars before any photometry (bulk Gaia X-Match).
     positions = list(zip(recent["oid"], recent["meanra"], recent["meandec"]))
     if reject_stars:
         star_map = gaia_star_mask(positions)
         oids = [o for (o, _ra, _dec) in positions if not star_map.get(o, (False, {}))[0]]
-        print(f"Stage 1b stars   : removed {len(positions) - len(oids)} Gaia stars "
-              f"before photometry; {len(oids)} remain")
+        _stage(f"Stage 1b stars   : removed {len(positions) - len(oids)} Gaia stars "
+               f"before photometry; {len(oids)} remain")
         default_star = False
     else:
         star_map = {}
         oids = [o for (o, _ra, _dec) in positions]
         default_star = None
-    
-    #build a lookup right after the Stage-1b block and attach it to the photometry survivors:
+
     meta = {str(r.oid): (r.firstmjd, r.ndet) for r in recent.itertuples()}
-    
-    # Stage 2: photometry (alert + forced) + epochs, only on the survivors.
+
+    def newest_first(o):
+        fm = meta.get(o, (np.nan, np.nan))[0]
+        return -float(fm) if np.isfinite(fm) else 0.0
+
+    # What actually needs doing today (everything, if there is no state file yet).
+    work, track, skipped = state.plan(oids, meta, now_mjd, sigma_max, recheck_not_blue_days)
+    track_set = set(track)
+    why = "; ".join(f"{n} {w}" for w, n in sorted(skipped.items())) or "none"
+    _stage(f"Cache    : {len(work)} to screen (new / retry), {len(track)} tracked candidates to "
+           f"refresh, {sum(skipped.values())} already decided and skipped ({why})")
+    photo_oids = sorted(work + track, key=newest_first)
+
+    # Stage 2: photometry (alert + forced) + epochs, only where needed.
+    _stage(f"Stage 2  epochs  : pulling photometry for {len(photo_oids)} objects...")
     photo = _parallel_map(
-        lambda oid: screen_photometry(oid, _get_client(), use_forced=use_forced), oids, workers,
-        on_error=lambda oid, exc: print(f"    [photometry failed for {oid}: {exc}]"))
-    photo_pass = [s for _oid, s in photo if s is not None]
-    for s in photo_pass:
-        star, ginfo = star_map.get(s["oid"], (default_star, {}))
+        lambda oid: screen_photometry(oid, _get_client(), use_forced=use_forced), photo_oids, workers,
+        on_error=lambda oid, exc: print(f"    [photometry failed for {oid}: {exc}]"),
+        label="photometry", budget_min=bud(0.35))
+    photo_pass, n_dropped = [], 0
+    for oid, s in photo:
+        fm, nd = meta.get(oid, (np.nan, np.nan))
+        if s is None:                                   # too few matched g/r epochs
+            if oid not in track_set:
+                state.mark(oid, "few", nd, fm, now_mjd)
+            continue
+        star, ginfo = star_map.get(oid, (default_star, {}))
         s["is_star"] = star
         s["gaia_pm_sig"] = ginfo.get("pm_sig")
         s["gaia_plx_sig"] = ginfo.get("plx_sig")
-        s["firstmjd"], s["ndet"] = meta.get(s["oid"], (np.nan, np.nan))
-    print(f"Stage 2  epochs  : {len(photo_pass)} have >= {MIN_EPOCHS} matched g/r epochs")
+        s["firstmjd"], s["ndet"] = fm, nd
+        photo_pass.append(s)
+        if not s["is_blue"]:
+            n_dropped += oid in track_set
+            state.mark(oid, "red", nd, fm, now_mjd, drop=int(oid in track_set))
+    _stage(f"Stage 2  epochs  : {len(photo_pass)} have >= {MIN_EPOCHS} matched g/r epochs")
 
     blue = [s for s in photo_pass if s["is_blue"]]
-    print(f"Stage 3  blue    : {len(blue)} are currently blue (g-r < {COLOR_BLUE_THRESHOLD})")
+    tracked_blue = [s for s in blue if s["oid"] in track_set]
+    blue_new = sorted((s for s in blue if s["oid"] not in track_set), key=lambda s: newest_first(s["oid"]))
+    for s in tracked_blue:                              # reuse nuclear / AGN / spectrum results
+        cached = state.rec[s["oid"]].get("c") or {}
+        for k in CACHED_KEYS:
+            if k in cached:
+                s[k] = cached[k]
+    _stage(f"Stage 3  blue    : {len(blue)} are currently blue (g-r < {COLOR_BLUE_THRESHOLD}): "
+           f"{len(tracked_blue)} tracked candidates, {len(blue_new)} newly blue; "
+           f"{n_dropped} tracked candidates dropped (no longer blue)")
 
-    # Stage 4: nuclear test.
-    nuc = _parallel_map(lambda s: is_object_nuclear(s["oid"]), blue, workers)
+    # Stage 4: nuclear test -- only on objects never tested before.
+    _stage(f"Stage 4  nuclear : testing {len(blue_new)} newly blue objects (iinuclear, newest first)...")
+    nuc = _parallel_map(lambda s: is_object_nuclear(s["oid"]), blue_new, workers,
+                        on_error=lambda s, exc: print(f"    [nuclear failed for {s['oid']}: {exc}]"),
+                        label="nuclear", budget_min=bud(0.06))
+    tested, undetermined = set(), []
     for s, (is_nuc, p_val, sigma) in nuc:
         s["is_nuclear"], s["nuclear_pvalue"], s["nuclear_sigma"] = is_nuc, p_val, sigma
-    finalists = [s for s in blue
-                 if s.get("nuclear_sigma") is not None and s["nuclear_sigma"] <= sigma_max]
-    n_far = sum(1 for s in blue
-                if s.get("nuclear_sigma") is not None and s["nuclear_sigma"] > sigma_max)
-    undetermined = [s["oid"] for s in blue if s.get("nuclear_sigma") is None]
-    print(f"Stage 4  nuclear : {len(finalists)} within {sigma_max:g}sigma of host  "
-          f"({n_far} farther, {len(undetermined)} no host / undetermined)")
+        tested.add(s["oid"])
+        if sigma is None:
+            undetermined.append(s["oid"])
+            tries = state.rec.get(s["oid"], {}).get("n", 0) + 1
+            state.mark(s["oid"], "nohost", s["ndet"], s["firstmjd"], now_mjd, n=tries)
+        else:
+            state.put_candidate(s, now_mjd, sigma_max)
+    for s in tracked_blue:                              # keep their stored row current
+        state.put_candidate(s, now_mjd, sigma_max)
+    newly_ok = [s for s in blue_new if s["oid"] in tested
+                and s.get("nuclear_sigma") is not None and s["nuclear_sigma"] <= sigma_max]
+    n_far = sum(1 for s in blue_new if s["oid"] in tested
+                and s.get("nuclear_sigma") is not None and s["nuclear_sigma"] > sigma_max)
+    n_unreached = len(blue_new) - len(tested)
+    finalists = tracked_blue + newly_ok
+    # Tracked candidates whose refresh failed or ran out of time: publish the last known row.
+    fresh = {s["oid"] for s in photo_pass}
+    stale = [dict((state.rec[o].get("c") or {})) for o in track if o not in fresh]
+    stale = [c for c in stale if "oid" in c]
+    finalists += stale
+    _stage(f"Stage 4  nuclear : {len(finalists)} candidates within {sigma_max:g}sigma of host "
+           f"({len(tracked_blue)} refreshed, {len(stale)} last-known, {len(newly_ok)} new; "
+           f"of the new tests {n_far} farther, {len(undetermined)} no host / undetermined"
+           + (f"; {n_unreached} not reached yet -> next run" if n_unreached else "") + ")")
     if undetermined:
         print(f"         host-undetermined (no PS1/SDSS catalog match; worth a "
               f"manual look): {', '.join(undetermined)}")
+    state.save(now_mjd)          # checkpoint: the expensive part is now banked
 
     if require_rising:
         finalists = [s for s in finalists if s["is_rising"]]
         print(f"         rising  : {len(finalists)} of those are also rising")
-    
-    # Stage 5: Gaia AGN annotation -- informational only
+
+    # Stage 5: Gaia AGN annotation -- informational only; reuse cached results.
     for s in finalists:
         s.setdefault("gaia_agn", None)
-    if flag_agn and finalists:
+    need_agn = [s for s in finalists if s.get("gaia_agn") is None]
+    if flag_agn and need_agn:
         agn_res = _parallel_map(
             lambda s: gaia_agn_flag(s["ra"], s["dec"], agn_radius, agn_min_prob),
-            finalists, workers,
-            on_error=lambda s, exc: print(f"    [AGN check failed for {s['oid']}: {exc}]"))
+            need_agn, workers,
+            on_error=lambda s, exc: print(f"    [AGN check failed for {s['oid']}: {exc}]"),
+            label="gaia-agn", budget_min=bud(0.0))
         for s, (is_agn, info) in agn_res:
             s["gaia_agn"] = is_agn
             s["gaia_agn_grade"] = info.get("grade")
             s["gaia_agn_prob"] = info.get("qso_prob")
             s["gaia_agn_sep_arcsec"] = info.get("sep_arcsec")
             s["gaia_agn_z"] = info.get("redshift_qsoc")
+    if flag_agn and finalists:
         n_agn = sum(1 for s in finalists if s.get("gaia_agn") is True)
         n_likely = sum(1 for s in finalists if s.get("gaia_agn_grade") == "likely")
         n_unk = sum(1 for s in finalists if s.get("gaia_agn") is None)
-        print(f"Stage 5  AGN flag: {n_agn}/{len(finalists)} match a Gaia DR3 QSO "
-              f"candidate within {agn_radius:g}\" ({n_likely} graded 'likely', "
-              f"{n_unk} undetermined)")
+        _stage(f"Stage 5  AGN flag: {n_agn}/{len(finalists)} match a Gaia DR3 QSO "
+               f"candidate within {agn_radius:g}\" ({n_likely} graded 'likely', "
+               f"{n_unk} undetermined; {len(need_agn)} newly checked)")
 
     # Stage 6: archival host spectra -- informational only. Runs last, so it only
-    # ever sees candidates that survived every cut above (incl. --rising).
+    # ever sees candidates that survived every cut above (incl. --rising). Candidates
+    # whose spectrum was already checked keep that result.
     if check_spectra:
-        annotate_archival_spectra(finalists, spec_vac, spec_radius)
+        annotate_archival_spectra([s for s in finalists if not s.get("spec_checked")],
+                                  spec_vac, spec_radius)
+
+    for s in finalists:                                # bank the AGN / spectrum results
+        if s.get("nuclear_sigma") is not None:
+            state.put_candidate(s, now_mjd, sigma_max)
+    state.save(now_mjd)
 
     if plotdir and finalists:
         os.makedirs(plotdir, exist_ok=True)
         for s in finalists:
-            plot_lightcurve(s, savepath=os.path.join(plotdir, f"{s['oid']}.png"))
-        print(f"         plots   : wrote {len(finalists)} figure(s) to {plotdir}/")
+            if "_epochs" in s:                          # last-known rows have no light curve
+                plot_lightcurve(s, savepath=os.path.join(plotdir, f"{s['oid']}.png"))
+        print(f"         plots   : wrote figure(s) to {plotdir}/")
 
     return finalists
 
@@ -1032,7 +1339,8 @@ def results_table(finalists):
 # --------------------------------------------------------------------------- #
 #  Single-object path (debug)
 # --------------------------------------------------------------------------- #
-def classify_one(name, client=None, want_plot=False, reject_stars=True, use_forced=True):
+def classify_one(name, client=None, want_plot=False, reject_stars=True, use_forced=True,
+                 check_spectra=True, spec_vac=None, spec_radius=SPEC_MATCH_RADIUS_ARCSEC):
     if client is None:
         client = Alerce()
     if isinstance(name, str) and name.upper().startswith("ZTF"):
@@ -1070,7 +1378,18 @@ def classify_one(name, client=None, want_plot=False, reject_stars=True, use_forc
            None: "AGN n/a"}[s["gaia_agn"]]
     print(f"{name}: g-r={s['gr_color']:+.3f} ({blue}), {trend}, {star}, "
           f"sigma={f'{sig:.2f}' if sig is not None else 'n/a'}, "
-          f"is_nuclear={s['is_nuclear']}, {agn}, {s['n_matched_epochs']} epochs")
+          f"is_nuclear={s['is_nuclear']}, {agn}, {s['n_matched_epochs']} epochs, "
+          f"latest m={s['latest_mag']:.2f}")
+    if check_spectra:                     # same Stage 6 the full scan runs, for one object
+        annotate_archival_spectra([s], spec_vac, spec_radius)
+        if s.get("spec_checked"):
+            where = f"{s['ra']:.5f}, {s['dec']:.5f}"
+            if s["has_archival_spec"]:
+                print(f"    DESI VAC: {s['spec_type']}  z={s['spec_z']}  ZWARN={s['spec_zwarn']}  "
+                      f"sep={s['spec_sep_arcsec']}\"  ({s['spec_n_matches']} row(s))  {s['spec_url']}")
+            else:
+                print(f"    DESI VAC: no row within {spec_radius:g}\" of ({where}) "
+                      f"[this position was searched]")
     if want_plot:
         plot_lightcurve(s)
     return s
@@ -1111,13 +1430,28 @@ if __name__ == "__main__":
                         "spectra_finding/data/agngal_desi.fits)")
     p.add_argument("--spec-radius", type=float, default=SPEC_MATCH_RADIUS_ARCSEC,
                    help="match radius in arcsec for the archival-spectrum check (default 2.0)")
+    p.add_argument("--max-minutes", type=float, default=0,
+                   help="wall-clock limit in minutes for the per-object work (default 0 = none). On a "
+                        "cold start with a big backlog the scan stops cleanly, saves its progress to "
+                        "the state file and the next run carries on (newest objects first).")
+    p.add_argument("--state", default=STATE_DEFAULT, metavar="JSON",
+                   help="per-object verdict cache so each run only screens NEW objects "
+                        "(default: state/scan_state.json next to this script)")
+    p.add_argument("--no-state", action="store_true", help="ignore and do not write the state file (screen everything)")
+    p.add_argument("--reset-state", action="store_true", help="discard the state file and rebuild it from scratch")
+    p.add_argument("--recheck-not-blue-days", type=float, default=0,
+                   help="also re-screen objects judged 'not blue' while they are younger than this many "
+                        "days and have gained detections (default 0 = never re-screen them)")
 
     args = p.parse_args()
 
     if args.target:
         classify_one(args.target, want_plot=args.plot, reject_stars=not args.keep_stars,
-                     use_forced=not args.no_forced)
+                     use_forced=not args.no_forced, check_spectra=not args.no_spec_check,
+                     spec_vac=args.spec_vac, spec_radius=args.spec_radius)
     else:
+        if os.path.exists("scan_partial.txt"):
+            os.remove("scan_partial.txt")
         finalists = run_scan(days=args.days, min_ndet=args.min_ndet, max_objects=args.max_objects,
                              require_rising=args.rising, reject_stars=not args.keep_stars,
                              reject_cvnova=not args.keep_cvnova, cvnova_classifier=args.cvnova_classifier,
@@ -1126,11 +1460,31 @@ if __name__ == "__main__":
                              flag_agn=not args.no_agn_flag, agn_radius=args.agn_radius,
                              agn_min_prob=args.agn_min_prob,
                              check_spectra=not args.no_spec_check, spec_vac=args.spec_vac,
-                             spec_radius=args.spec_radius,
-                             plotdir=args.plotdir if args.plot else None)
+                             spec_radius=args.spec_radius, max_minutes=args.max_minutes,
+                             plotdir=args.plotdir if args.plot else None,
+                             state_path=None if args.no_state else args.state,
+                             reset_state=args.reset_state,
+                             recheck_not_blue_days=args.recheck_not_blue_days)
         table = results_table(finalists)
         print("\n=== Final candidates (blue + non-stellar + non-CV + nuclear) ===")
         print(table.to_string(index=False) if len(table) else "(none)")
+        exit_code = 0
         if args.out:
-            table.to_csv(args.out, index=False)
-            print(f"\nwrote {len(table)} row(s) -> {args.out}")
+            if _PARTIAL and len(table) == 0:
+                # Never replace the published list with an empty one from a run that
+                # ran out of time: fail loudly and keep the previous CSV.
+                print("\nERROR: time budget hit and nothing finished; NOT writing " + args.out,
+                      file=sys.stderr)
+                exit_code = 1
+            else:
+                table.to_csv(args.out, index=False)
+                print(f"\nwrote {len(table)} row(s) -> {args.out}")
+                if _PARTIAL:
+                    with open("scan_partial.txt", "w") as fh:
+                        fh.write("PARTIAL SCAN (time budget): " + "; ".join(_PARTIAL) + "\n")
+        if _PARTIAL:
+            # Abandoned worker threads may still be blocked in a network call and
+            # would keep the interpreter from exiting; leave without joining them.
+            sys.stdout.flush(); sys.stderr.flush()
+            os._exit(exit_code)
+        sys.exit(exit_code)
