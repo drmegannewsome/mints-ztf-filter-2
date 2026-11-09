@@ -9,7 +9,7 @@ on:
         description: "Discovery window in days (--days)"
         type: choice
         options: ["14", "30", "45", "60", "90"]
-        default: "60"
+        default: "90"
       min_ndet:
         description: "Minimum detections (--min-ndet)"
         type: choice
@@ -81,7 +81,7 @@ jobs:
           # The `||` fallbacks supply the scheduled-run values, since `inputs`
           # is empty on a cron trigger. Keep them in step with the dispatch
           # defaults above.
-          DAYS:        ${{ inputs.days        || '60'  }}
+          DAYS:        ${{ inputs.days        || '90'  }}
           MIN_NDET:    ${{ inputs.min_ndet    || '4'   }}
           SIGMA_MAX:   ${{ inputs.sigma_max   || '2.0' }}   # runtime-neutral; raise to keep more rows
           RISING:      ${{ inputs.rising      || 'false' }}
@@ -109,7 +109,7 @@ jobs:
         run: |
           {
             date -u +"%Y-%m-%dT%H:%M:%SZ"
-            echo "days=${{ inputs.days || '60' }} min_ndet=${{ inputs.min_ndet || '4' }} sigma_max=${{ inputs.sigma_max || '2.0' }} rising=${{ inputs.rising || 'false' }}"
+            echo "days=${{ inputs.days || '90' }} min_ndet=${{ inputs.min_ndet || '4' }} sigma_max=${{ inputs.sigma_max || '2.0' }} rising=${{ inputs.rising || 'false' }}"
             echo "scan step: ${{ steps.scan.outcome }}"
             if [ -f scan_partial.txt ]; then cat scan_partial.txt; fi
           } > docs/last_run.txt

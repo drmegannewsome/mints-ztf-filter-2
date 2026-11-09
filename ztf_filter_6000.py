@@ -366,7 +366,7 @@ def query_recent_discoveries(client, days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS,
     if probability is not None:
         base["probability"] = probability
 
-    frames, page = [], 1
+    frames, page, t0 = [], 1, time.monotonic()
     while page <= max_pages:
         df = _safe_query_objects(client, page=page, **base)
         if df is None or len(df) == 0:
@@ -378,6 +378,8 @@ def query_recent_discoveries(client, days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS,
             break
         page += 1
 
+    _stage(f"   alerce object query{' (' + class_name + ')' if class_name else ''}: "
+           f"{page} page(s), {time.monotonic() - t0:.0f} s")
     if not frames:
         return pd.DataFrame(columns=["oid", "meanra", "meandec"])
     out = pd.concat(frames, ignore_index=True)
@@ -628,38 +630,37 @@ def _pm_significance(pmra, pmdec, pmra_e, pmdec_e):
 def gaia_star_mask(positions, radius_arcsec=GAIA_MATCH_RADIUS_ARCSEC,
                    pm_sig_thresh=GAIA_PM_SIG_THRESH, plx_sig_thresh=GAIA_PLX_SIG_THRESH,
                    proximity_arcsec=GAIA_PROXIMITY_ARCSEC, proximity_maxmag=GAIA_PROXIMITY_MAXMAG,
-                   chunk=2000, quiet=True):
+                   chunk=500, quiet=True):
     """Bulk Gaia DR3 stellar check via CDS X-Match (one request per chunk).
-    positions: iterable of (oid, ra_deg, dec_deg). Returns dict oid -> (is_star,
-    info). Rejects sources with significant PM/parallax OR a bright Gaia source
-    (Gmag <= proximity_maxmag) within proximity_arcsec. Chunk failure -> per-object."""
+    positions: iterable of (oid, ra_deg, dec_deg). Returns dict oid -> (is_star, info)
+    for EVERY position whose chunk was answered (info has "gaia_match": False if Gaia has
+    nothing there). Rejects sources with significant PM/parallax OR a bright Gaia source
+    (Gmag <= proximity_maxmag) within proximity_arcsec.
+
+    A chunk that keeps failing is retried as four smaller ones; if that fails too its
+    objects come back as (False, {"gaia_query_failed": True}) -- i.e. kept, and left for a
+    later run to re-check. There is deliberately NO per-object fallback: one-at-a-time Gaia
+    archive jobs take seconds each, so a failing X-Match used to turn this stage into
+    hours of serial queries."""
     from astropy.table import Table
     from astroquery.xmatch import XMatch
     rows = [(str(o), float(ra), float(dec)) for (o, ra, dec) in positions
             if np.isfinite(ra) and np.isfinite(dec)]
     out = {}
-    for i in range(0, len(rows), chunk):
-        sub = rows[i:i + chunk]
-        tbl = Table(rows=sub, names=["oid", "ra", "dec"])
-        try:
-            with _silence(quiet):
-                res = XMatch.query(cat1=tbl, cat2="vizier:I/355/gaiadr3",
-                                   max_distance=radius_arcsec * u.arcsec,
-                                   colRA1="ra", colDec1="dec")
-        except Exception as exc:
-            print(f"    [bulk Gaia X-Match failed (chunk {i // chunk}): {exc}; "
-                  f"falling back to per-object]")
-            for (o, ra, dec) in sub:
-                out[o] = is_gaia_star(ra, dec, radius_arcsec, pm_sig_thresh, plx_sig_thresh, quiet=True)
-            continue
+
+    def _parse(res, sub):
+        for (o, _ra, _dec) in sub:
+            out[o] = (False, {"gaia_match": False})
         if res is None or len(res) == 0:
-            continue
+            return
         need = ("pmRA", "pmDE", "e_pmRA", "e_pmDE", "Plx", "e_Plx")
         missing = [c for c in need if c not in res.colnames]
         if missing:
             print(f"    [X-Match columns {list(res.colnames)} missing {missing}; "
                   f"cannot assess stars this chunk]")
-            continue
+            for (o, _ra, _dec) in sub:
+                out[o] = (False, {"gaia_query_failed": True})
+            return
         nearest = {}
         for r in res:
             o, sep = str(r["oid"]), float(r["angDist"])
@@ -680,10 +681,43 @@ def gaia_star_mask(positions, radius_arcsec=GAIA_MATCH_RADIUS_ARCSEC,
             is_star = ((np.isfinite(pm_sig) and pm_sig > pm_sig_thresh) or
                        (np.isfinite(plx_sig) and plx_sig > plx_sig_thresh) or near)
             out[o] = (bool(is_star),
-                      {"gaia_sep_arcsec": sep,
+                      {"gaia_match": True,
+                       "gaia_sep_arcsec": sep,
                        "gaia_gmag": float(gmag) if np.isfinite(gmag) else None,
                        "pm_sig": float(pm_sig) if np.isfinite(pm_sig) else None,
                        "plx_sig": float(plx_sig) if np.isfinite(plx_sig) else None})
+
+    def _xmatch(sub):
+        tbl = Table(rows=sub, names=["oid", "ra", "dec"])
+        with _silence(quiet):
+            return _with_retries(XMatch.query, cat1=tbl, cat2="vizier:I/355/gaiadr3",
+                                 max_distance=radius_arcsec * u.arcsec,
+                                 colRA1="ra", colDec1="dec", _tries=3)
+
+    n_chunks, n_failed = (len(rows) + chunk - 1) // chunk, 0
+    for i in range(0, len(rows), chunk):
+        sub, t0 = rows[i:i + chunk], time.monotonic()
+        try:
+            _parse(_xmatch(sub), sub)
+            _stage(f"   gaia x-match chunk {i // chunk + 1}/{n_chunks}: {len(sub)} objects, "
+                   f"{time.monotonic() - t0:.0f} s")
+            continue
+        except Exception as exc:
+            print(f"    [bulk Gaia X-Match failed (chunk {i // chunk + 1}/{n_chunks}, "
+                  f"{time.monotonic() - t0:.0f} s): {exc}; retrying as 4 smaller requests]")
+        step = max(1, (len(sub) + 3) // 4)
+        for j in range(0, len(sub), step):
+            part = sub[j:j + step]
+            try:
+                _parse(_xmatch(part), part)
+            except Exception as exc:
+                n_failed += len(part)
+                print(f"    [Gaia X-Match failed for {len(part)} objects: {exc}; keeping them "
+                      f"unchecked (re-checked on a later run)]")
+                for (o, _ra, _dec) in part:
+                    out[o] = (False, {"gaia_query_failed": True})
+    if n_failed:
+        _stage(f"   !! Gaia X-Match left {n_failed} of {len(rows)} objects unchecked")
     return out
 
 
@@ -993,7 +1027,7 @@ def plot_lightcurve(result, savepath=None):
 #   "nohost" iinuclear returned nothing (no host catalogue, or an error); retried up to
 #            NUC_MAX_ATTEMPTS times, then parked.
 # Records are dropped once their first detection is older than STATE_KEEP_DAYS.
-STATE_VERSION = 1
+STATE_VERSION = 2
 STATE_DEFAULT = os.path.join(_HERE, "state", "scan_state.json")
 NUC_MAX_ATTEMPTS = 3
 STATE_KEEP_DAYS = MAX_AGE_DAYS + 10
@@ -1004,7 +1038,9 @@ CACHED_KEYS = (("is_nuclear", "nuclear_pvalue", "nuclear_sigma", "gaia_agn", "ga
 def _state_params(use_forced):
     """Settings a cached verdict depends on. If any differ, the file is not reused."""
     return {"blue": COLOR_BLUE_THRESHOLD, "min_epochs": MIN_EPOCHS, "n_color": N_COLOR_EPOCHS,
-            "match_days": GR_MATCH_WINDOW_DAYS, "forced": bool(use_forced)}
+            "match_days": GR_MATCH_WINDOW_DAYS, "forced": bool(use_forced),
+            "gaia": [GAIA_MATCH_RADIUS_ARCSEC, GAIA_PM_SIG_THRESH, GAIA_PLX_SIG_THRESH,
+                     GAIA_PROXIMITY_ARCSEC, GAIA_PROXIMITY_MAXMAG]}
 
 
 def _clean(v):
@@ -1030,6 +1066,7 @@ class ScanState:
     def __init__(self, path, params):
         self.path, self.params = path, params
         self.rec = {}
+        self.gaia = {}               # oid -> [is_star(0/1), firstmjd, pm_sig, plx_sig]; positions never move
         self.readonly = False        # True: use nothing from disk AND never overwrite it
 
     @classmethod
@@ -1054,7 +1091,8 @@ class ScanState:
                    f"({doc.get('params')} vs {params}); ignoring it and NOT overwriting it")
             return st
         st.rec = doc.get("records", {})
-        _stage(f"State    : loaded {len(st.rec)} object verdicts from {path}")
+        st.gaia = doc.get("gaia", {})
+        _stage(f"State    : loaded {len(st.rec)} object verdicts and {len(st.gaia)} Gaia star checks from {path}")
         return st
 
     def save(self, now_mjd):
@@ -1064,13 +1102,16 @@ class ScanState:
         self.rec = {o: r for o, r in self.rec.items()
                     if r.get("fm") is None or r["fm"] >= cutoff}
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        self.gaia = {o: g for o, g in self.gaia.items() if g[1] is None or g[1] >= cutoff}
         lines = [f'{json.dumps(o)}:{json.dumps(self.rec[o], separators=(",", ":"), sort_keys=True)}'
                  for o in sorted(self.rec)]
+        glines = [f'{json.dumps(o)}:{json.dumps(self.gaia[o], separators=(",", ":"))}'
+                  for o in sorted(self.gaia)]
         head = '{"version":%d,"params":%s,"records":{\n' % (
             STATE_VERSION, json.dumps(self.params, sort_keys=True))
         tmp = self.path + ".tmp"
         with open(tmp, "w") as fh:
-            fh.write(head + ",\n".join(lines) + "\n}}\n")
+            fh.write(head + ",\n".join(lines) + '\n},"gaia":{\n' + ",\n".join(glines) + "\n}}\n")
         os.replace(tmp, self.path)
 
     def mark(self, oid, status, ndet, firstmjd, now_mjd, **extra):
@@ -1169,10 +1210,28 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
         _stage(f"Stage 1a CV/Nova : removed {before - len(recent)} CV/Nova "
                f"(p>={cvnova_prob}); {len(recent)} remain")
 
-    # Stage 1b: reject stars before any photometry (bulk Gaia X-Match).
+    meta = {str(r.oid): (r.firstmjd, r.ndet) for r in recent.itertuples()}
+
+    # Stage 1b: reject stars before any photometry (bulk Gaia X-Match). A star's Gaia
+    # verdict never changes, so only objects not checked on an earlier run are sent.
     positions = list(zip(recent["oid"], recent["meanra"], recent["meandec"]))
     if reject_stars:
-        star_map = gaia_star_mask(positions)
+        todo = [p for p in positions if p[0] not in state.gaia]
+        _stage(f"Stage 1b stars   : {len(positions) - len(todo)} already checked on earlier runs; "
+               f"X-matching {len(todo)} new against Gaia DR3...")
+        fresh = gaia_star_mask(todo) if todo else {}
+        star_map = {}
+        for (o, _ra, _dec) in positions:
+            if o in fresh:
+                star_map[o] = fresh[o]
+                if not fresh[o][1].get("gaia_query_failed"):     # unchecked ones are retried next run
+                    info = fresh[o][1]
+                    rnd = lambda v: None if v is None else round(float(v), 2)
+                    state.gaia[o] = [int(fresh[o][0]), _clean(meta[o][0]),
+                                     rnd(info.get("pm_sig")), rnd(info.get("plx_sig"))]
+            elif o in state.gaia:
+                flag, _fm, pm, plx = state.gaia[o]
+                star_map[o] = (bool(flag), {"pm_sig": pm, "plx_sig": plx})
         oids = [o for (o, _ra, _dec) in positions if not star_map.get(o, (False, {}))[0]]
         _stage(f"Stage 1b stars   : removed {len(positions) - len(oids)} Gaia stars "
                f"before photometry; {len(oids)} remain")
@@ -1181,8 +1240,6 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
         star_map = {}
         oids = [o for (o, _ra, _dec) in positions]
         default_star = None
-
-    meta = {str(r.oid): (r.firstmjd, r.ndet) for r in recent.itertuples()}
 
     def newest_first(o):
         fm = meta.get(o, (np.nan, np.nan))[0]
@@ -1210,7 +1267,7 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
                 state.mark(oid, "few", nd, fm, now_mjd)
             continue
         star, ginfo = star_map.get(oid, (default_star, {}))
-        s["is_star"] = star
+        s["is_star"] = None if ginfo.get("gaia_query_failed") else star
         s["gaia_pm_sig"] = ginfo.get("pm_sig")
         s["gaia_plx_sig"] = ginfo.get("plx_sig")
         s["firstmjd"], s["ndet"] = fm, nd
@@ -1452,6 +1509,13 @@ if __name__ == "__main__":
     else:
         if os.path.exists("scan_partial.txt"):
             os.remove("scan_partial.txt")
+        if args.max_minutes:
+            # Last-resort watchdog: if ANYTHING (a stage the budget doesn't cover, a hung
+            # library call) is still running 25 min after the budget, print every thread's
+            # stack -- so the log shows exactly where it is stuck -- and exit non-zero.
+            # That lets the workflow still commit the saved state before its 240 min limit.
+            import faulthandler
+            faulthandler.dump_traceback_later((args.max_minutes + 25) * 60, exit=True)
         finalists = run_scan(days=args.days, min_ndet=args.min_ndet, max_objects=args.max_objects,
                              require_rising=args.rising, reject_stars=not args.keep_stars,
                              reject_cvnova=not args.keep_cvnova, cvnova_classifier=args.cvnova_classifier,
@@ -1465,6 +1529,9 @@ if __name__ == "__main__":
                              state_path=None if args.no_state else args.state,
                              reset_state=args.reset_state,
                              recheck_not_blue_days=args.recheck_not_blue_days)
+        if args.max_minutes:
+            import faulthandler
+            faulthandler.cancel_dump_traceback_later()
         table = results_table(finalists)
         print("\n=== Final candidates (blue + non-stellar + non-CV + nuclear) ===")
         print(table.to_string(index=False) if len(table) else "(none)")

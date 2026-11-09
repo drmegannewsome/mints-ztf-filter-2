@@ -31,6 +31,7 @@ The scan remembers what it has decided, so each daily run only screens **new** o
 | not blue (or stopped being blue) | never re-screened |
 | blue, but not within `--sigma-max` of its host | never re-screened (the sigma is stored, so changing `--sigma-max` later needs no new iinuclear run) |
 | blue and nuclear (a tracked candidate) | only its photometry is refreshed each day (colour, rising, latest mag); nuclear, Gaia-AGN and spectrum results are reused. If it is no longer blue it is dropped |
+| Gaia star | checked once (a star's Gaia verdict never changes); only new objects go to the X-Match each day |
 | fewer than 3 g/r epochs | re-screened only once it has gained detections |
 | no usable host for iinuclear | retried up to 3 times, then parked |
 
@@ -39,10 +40,15 @@ The workflow commits this file with `candidates.csv`. Records are dropped once a
 objects that gain detections. If the settings that define a verdict change (blue threshold, epoch rules, `--no-forced`), the file
 is ignored and left untouched.
 
-## Time budget
+## Time budget and the default 90-day window
 
-`--max-minutes 200` (job limit is 240) is there for the first, cold-start run. Newest objects are screened first; when the time is
-up the scan **saves its progress**, publishes what it has, and `docs/last_run.txt` says `PARTIAL SCAN`. The next run continues
-with only the objects not yet decided. HTTP calls also have timeouts so one stalled request cannot hang the job.
+The workflow scans the last **90 days** (`--days 90`). `--max-minutes 200` (job limit 240) is there for the first, cold-start run:
+newest objects are screened first; when the time is up the scan **saves its progress**, publishes what it has, and
+`docs/last_run.txt` says `PARTIAL SCAN`. The next run continues with only the objects not yet decided.
+
+Every stage logs a minute-stamped line, and a watchdog (budget + 25 min) prints every thread's stack and exits non-zero if
+anything is still running, so a stall shows up in the log instead of as a silent 4-hour cancellation. The state file is
+committed even then. If the Gaia X-Match service fails, those objects are kept (unchecked) and re-tried next run; the scan no longer
+falls back to one Gaia archive query per object, which could take hours.
 
 Quick local test of one object (incl. the DESI check): `python ztf_filter_6000.py --target ZTF26abyczrf --spec-vac PATH/agngal_desi.fits`
