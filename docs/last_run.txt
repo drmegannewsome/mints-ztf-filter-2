@@ -1,2 +1,4 @@
-2026-11-05T20:01:05Z
-days=30 min_ndet=4 sigma_max=1.0 rising=false
+2026-11-09T19:41:31Z
+days=90 min_ndet=4 sigma_max=1.0 rising=false
+scan step: success
+PARTIAL SCAN (time budget): photometry: 15205 of 17035 unfinished
