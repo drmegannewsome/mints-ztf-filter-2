@@ -48,7 +48,15 @@ newest objects are screened first; when the time is up the scan **saves its prog
 
 Every stage logs a minute-stamped line, and a watchdog (budget + 25 min) prints every thread's stack and exits non-zero if
 anything is still running, so a stall shows up in the log instead of as a silent 4-hour cancellation. The state file is
-committed even then. If the Gaia X-Match service fails, those objects are kept (unchecked) and re-tried next run; the scan no longer
-falls back to one Gaia archive query per object, which could take hours.
+committed even then.
+
+**If the CDS X-Match service is down** (as it was in Nov 2026): the first failed request trips a circuit breaker and the bulk
+star check is skipped for that run (it costs about a minute, not hours). Objects that become candidates are then star-checked one by
+one against the Gaia archive ("Stage 4b"), and objects not yet checked are retried in bulk on later runs. Nothing needs changing when
+CDS comes back.
+
+Rough cost of a cold start over 90 days (~17,000 objects): ALeRCE photometry runs at ~150 objects/min with `--rate 5`, i.e. about
+2 hours; iinuclear is quick (~200 blue objects in under 2 minutes). Once the state file is full, a daily run only handles the ~200 new
+objects plus the tracked candidates.
 
 Quick local test of one object (incl. the DESI check): `python ztf_filter_6000.py --target ZTF26abyczrf --spec-vac PATH/agngal_desi.fits`

@@ -637,11 +637,14 @@ def gaia_star_mask(positions, radius_arcsec=GAIA_MATCH_RADIUS_ARCSEC,
     nothing there). Rejects sources with significant PM/parallax OR a bright Gaia source
     (Gmag <= proximity_maxmag) within proximity_arcsec.
 
-    A chunk that keeps failing is retried as four smaller ones; if that fails too its
-    objects come back as (False, {"gaia_query_failed": True}) -- i.e. kept, and left for a
-    later run to re-check. There is deliberately NO per-object fallback: one-at-a-time Gaia
-    archive jobs take seconds each, so a failing X-Match used to turn this stage into
-    hours of serial queries."""
+    Failure handling (the service has been down for days at a time): a chunk that fails
+    with a CONNECTION error trips a circuit breaker -- the rest of the run is skipped at once
+    rather than timing out chunk after chunk (that cost 107 min once). Any other failure is
+    retried as four smaller requests, and two failed chunks in a row also trip it. Objects
+    not checked come back as (False, {"gaia_query_failed": True}): kept, re-checked on a later
+    run, and run_scan checks the ones that become candidates one by one instead.
+    There is deliberately NO per-object fallback here: thousands of one-at-a-time Gaia
+    archive jobs take hours."""
     from astropy.table import Table
     from astroquery.xmatch import XMatch
     rows = [(str(o), float(ra), float(dec)) for (o, ra, dec) in positions
@@ -692,30 +695,54 @@ def gaia_star_mask(positions, radius_arcsec=GAIA_MATCH_RADIUS_ARCSEC,
         with _silence(quiet):
             return _with_retries(XMatch.query, cat1=tbl, cat2="vizier:I/355/gaiadr3",
                                  max_distance=radius_arcsec * u.arcsec,
-                                 colRA1="ra", colDec1="dec", _tries=3)
+                                 colRA1="ra", colDec1="dec", _tries=2)
 
-    n_chunks, n_failed = (len(rows) + chunk - 1) // chunk, 0
+    def _conn_error(exc):
+        msg = f"{type(exc).__name__} {exc}".lower()
+        return (isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+                or any(k in msg for k in ("connecttimeout", "max retries exceeded", "connection refused",
+                                          "name or service not known", "temporary failure in name")))
+
+    def _give_up(sub, why):
+        for (o, _ra, _dec) in sub:
+            out[o] = (False, {"gaia_query_failed": True})
+        return len(sub)
+
+    n_chunks, n_failed, bad_in_a_row, tripped = (len(rows) + chunk - 1) // chunk, 0, 0, False
     for i in range(0, len(rows), chunk):
         sub, t0 = rows[i:i + chunk], time.monotonic()
+        if tripped:
+            n_failed += _give_up(sub, "breaker")
+            continue
         try:
             _parse(_xmatch(sub), sub)
+            bad_in_a_row = 0
             _stage(f"   gaia x-match chunk {i // chunk + 1}/{n_chunks}: {len(sub)} objects, "
                    f"{time.monotonic() - t0:.0f} s")
             continue
         except Exception as exc:
             print(f"    [bulk Gaia X-Match failed (chunk {i // chunk + 1}/{n_chunks}, "
-                  f"{time.monotonic() - t0:.0f} s): {exc}; retrying as 4 smaller requests]")
-        step = max(1, (len(sub) + 3) // 4)
+                  f"{time.monotonic() - t0:.0f} s): {str(exc)[:200]}]")
+            if _conn_error(exc):
+                _stage("   !! CDS X-Match is unreachable: skipping the bulk star check for this run")
+                tripped = True
+                n_failed += _give_up(sub, "unreachable")
+                continue
+            print("    [retrying as 4 smaller requests]")
+        step, ok_parts = max(1, (len(sub) + 3) // 4), 0
         for j in range(0, len(sub), step):
             part = sub[j:j + step]
             try:
                 _parse(_xmatch(part), part)
+                ok_parts += 1
             except Exception as exc:
-                n_failed += len(part)
-                print(f"    [Gaia X-Match failed for {len(part)} objects: {exc}; keeping them "
+                n_failed += _give_up(part, "failed")
+                print(f"    [Gaia X-Match failed for {len(part)} objects: {str(exc)[:200]}; keeping them "
                       f"unchecked (re-checked on a later run)]")
-                for (o, _ra, _dec) in part:
-                    out[o] = (False, {"gaia_query_failed": True})
+        bad_in_a_row = 0 if ok_parts else bad_in_a_row + 1
+        if bad_in_a_row >= 2 and not tripped:
+            _stage("   !! two X-Match chunks failed in a row: skipping the bulk star check for this run")
+            tripped = True
     if n_failed:
         _stage(f"   !! Gaia X-Match left {n_failed} of {len(rows)} objects unchecked")
     return out
@@ -1240,6 +1267,7 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
         star_map = {}
         oids = [o for (o, _ra, _dec) in positions]
         default_star = None
+    state.save(now_mjd)          # checkpoint: Gaia star verdicts are banked
 
     def newest_first(o):
         fm = meta.get(o, (np.nan, np.nan))[0]
@@ -1276,6 +1304,7 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
             n_dropped += oid in track_set
             state.mark(oid, "red", nd, fm, now_mjd, drop=int(oid in track_set))
     _stage(f"Stage 2  epochs  : {len(photo_pass)} have >= {MIN_EPOCHS} matched g/r epochs")
+    state.save(now_mjd)          # checkpoint: not-blue / too-few-epochs verdicts are banked
 
     blue = [s for s in photo_pass if s["is_blue"]]
     tracked_blue = [s for s in blue if s["oid"] in track_set]
@@ -1325,6 +1354,30 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
         print(f"         host-undetermined (no PS1/SDSS catalog match; worth a "
               f"manual look): {', '.join(undetermined)}")
     state.save(now_mjd)          # checkpoint: the expensive part is now banked
+
+    # Candidates the bulk X-Match never answered for (service down, or an earlier run): one
+    # Gaia archive cone search each. A few hundred at most, instead of all ~17k objects.
+    if reject_stars:
+        unchecked = [s for s in finalists if s["oid"] not in state.gaia]
+        if unchecked:
+            _stage(f"Stage 4b stars  : {len(unchecked)} candidates were not star-checked in bulk; "
+                   f"checking them one by one (Gaia archive)...")
+            res = _parallel_map(
+                lambda s: is_gaia_star(s["ra"], s["dec"]), unchecked, workers,
+                on_error=lambda s, exc: print(f"    [Gaia star check failed for {s['oid']}: {exc}]"),
+                label="gaia-star", budget_min=bud(0.12))
+            n_star = 0
+            for s, (is_star, info) in res:
+                if info.get("gaia_query_failed"):
+                    continue                                   # unknown: kept, retried next run
+                rnd = lambda v: None if v is None else round(float(v), 2)
+                state.gaia[s["oid"]] = [int(is_star), _clean(s.get("firstmjd")),
+                                        rnd(info.get("pm_sig")), rnd(info.get("plx_sig"))]
+                s["is_star"], s["gaia_pm_sig"], s["gaia_plx_sig"] = is_star, info.get("pm_sig"), info.get("plx_sig")
+                n_star += bool(is_star)
+            finalists = [s for s in finalists if not state.gaia.get(s["oid"], [0])[0]]
+            _stage(f"Stage 4b stars  : {n_star} of the {len(unchecked)} are Gaia stars and were removed; "
+                   f"{len(res) - n_star} confirmed non-stellar; {len(unchecked) - len(res)} not checked")
 
     if require_rising:
         finalists = [s for s in finalists if s["is_rising"]]
