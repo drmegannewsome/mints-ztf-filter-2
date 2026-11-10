@@ -183,6 +183,48 @@ def _astuple(x):
     return x if isinstance(x, tuple) else (x,)
 
 
+class _ThreadStream:
+    """Stand-in for sys.stdout/sys.stderr. By default it forwards to the real stream; a
+    thread can opt in (via _capture_thread) to have what IT prints collected instead --
+    safe with many worker threads, unlike swapping sys.stdout around a call."""
+    def __init__(self, base):
+        self.base, self.local = base, threading.local()
+
+    def write(self, text):
+        buf = getattr(self.local, "buf", None)
+        if buf is not None:
+            buf.append(text)
+            return len(text)
+        return self.base.write(text)
+
+    def flush(self):
+        self.base.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+
+_capture_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _capture_thread():
+    """Collect everything the current thread prints (stdout and stderr) into a list."""
+    with _capture_lock:
+        for name in ("stdout", "stderr"):
+            if not isinstance(getattr(sys, name), _ThreadStream):
+                setattr(sys, name, _ThreadStream(getattr(sys, name)))
+    buf = []
+    streams = (sys.stdout, sys.stderr)
+    for st in streams:
+        st.local.buf = buf
+    try:
+        yield buf
+    finally:
+        for st in streams:
+            st.local.buf = None
+
+
 _TRANSIENT_SIGNATURES = ("500", "502", "503", "504", "timeout", "timed out",
                          "gateway", "temporarily unavailable", "connection")
 _RATE_LIMIT_SIGNATURES = ("403", "429", "forbidden", "too many requests", "rate limit")
@@ -199,12 +241,22 @@ def _is_rate_limit_error(exc):
 
 
 class _RateLimiter:
-    """Global throttle: spaces request starts >= 1/max_per_sec apart across all
-    threads. max_per_sec<=0 disables it."""
+    """Global throttle: spaces request starts >= min_interval apart across all threads.
+    max_per_sec<=0 disables it. It also ADAPTS: when a server answers 403/429, penalize()
+    makes every thread pause together and slows the pace (x1.5, at most once per 5 s, down
+    to 0.5 requests/s); after 60 clean requests it speeds back up (x0.85) toward the
+    configured rate. So it settles just under the server's real limit instead of every
+    thread sleeping alone and retrying into the same wall."""
+    SLOWEST_INTERVAL = 2.0
+
     def __init__(self, max_per_sec):
-        self.min_interval = (1.0 / max_per_sec) if (max_per_sec and max_per_sec > 0) else 0.0
+        self.base_interval = (1.0 / max_per_sec) if (max_per_sec and max_per_sec > 0) else 0.0
+        self.min_interval = self.base_interval
         self._lock = threading.Lock()
         self._next = 0.0
+        self._ok = 0
+        self._last_penalty = -1e9
+        self.n_penalties = 0
 
     def acquire(self):
         if self.min_interval <= 0:
@@ -217,6 +269,27 @@ class _RateLimiter:
                 now = time.monotonic()
             self._next = max(now, self._next) + self.min_interval
 
+    def penalize(self, pause_s):
+        if self.base_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            self._next = max(self._next, now + pause_s)       # everyone waits, not just the caller
+            self._ok = 0
+            if now - self._last_penalty > 5.0:
+                self._last_penalty = now
+                self.n_penalties += 1
+                self.min_interval = min(self.min_interval * 1.5, self.SLOWEST_INTERVAL)
+
+    def reward(self):
+        if self.base_interval <= 0:
+            return
+        with self._lock:
+            self._ok += 1
+            if self._ok >= 60 and self.min_interval > self.base_interval:
+                self._ok = 0
+                self.min_interval = max(self.base_interval, self.min_interval * 0.85)
+
 
 _RATE_LIMITER = _RateLimiter(0)
 
@@ -227,7 +300,9 @@ def _with_retries(func, *args, _tries=5, _base_delay=2.0, _quiet=False, **kwargs
     for attempt in range(1, _tries + 1):
         _RATE_LIMITER.acquire()
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            _RATE_LIMITER.reward()
+            return result
         except Exception as exc:
             rate_limited = _is_rate_limit_error(exc)
             if attempt >= _tries or not (rate_limited or _is_transient_error(exc)):
@@ -236,7 +311,10 @@ def _with_retries(func, *args, _tries=5, _base_delay=2.0, _quiet=False, **kwargs
             if not _quiet:
                 kind = "rate-limited (403/429)" if rate_limited else "transient API error"
                 print(f"    [{kind}; attempt {attempt}/{_tries}, backing off {delay:.0f}s]")
-            time.sleep(delay)
+            if rate_limited and _RATE_LIMITER.base_interval > 0:
+                _RATE_LIMITER.penalize(delay)       # all threads pause; the next acquire() waits it out
+            else:
+                time.sleep(delay)
 
 
 _thread_local = threading.local()
@@ -763,12 +841,12 @@ def _clear_iinuclear_cache(name, base_dir="."):
                 pass
 
 
-def is_object_nuclear(identifier, quiet=True, _retry=True):
+def is_object_nuclear(identifier, quiet=True, _retry=True, _mute=True):
     """Return (is_nuclear, p_value, sigma); all None if no usable host catalog or
     on error. plot=False skips iinuclear's (unused) image download. A 'used_catalog'
     crash usually means a stale/empty cached catalog -> clear it and retry once."""
     try:
-        with _silence(quiet):
+        with _silence(quiet and _mute):
             try:
                 out = get_data(identifier, plot=False)
             except TypeError:
@@ -788,12 +866,34 @@ def is_object_nuclear(identifier, quiet=True, _retry=True):
         msg = str(exc).lower()
         if _retry and "used_catalog" in msg:
             _clear_iinuclear_cache(identifier)
-            return is_object_nuclear(identifier, quiet=quiet, _retry=False)
+            return is_object_nuclear(identifier, quiet=quiet, _retry=False, _mute=_mute)
         no_host = ("isfinite" in msg or "weights sum to zero" in msg
                    or "zero-size array" in msg or "used_catalog" in msg)
         if not (quiet and no_host):
             print(f"    [nuclear check failed for {identifier}: {exc}]")
         return None, None, None
+
+# iinuclear swallows its own network errors and just prints them, so a catalog or ALeRCE
+# outage looks exactly like "this galaxy has no host". These are the messages that mean
+# the SERVICE failed (the SDSS one is not listed: "no SDSS objects here" prints it too).
+_NUCLEAR_SERVICE_MARKERS = ("error querying panstarrs", "error querying alerce",
+                            "nuclear check failed")
+
+
+def nuclear_check(identifier):
+    """is_object_nuclear plus a verdict on WHY there is no answer. Returns
+    (is_nuclear, p_value, sigma, status) with status 'ok' (sigma measured), 'no_host'
+    (the catalogs answered and there is nothing to measure against) or 'service_error'
+    (PanSTARRS / ALeRCE errored: unknown, so try again later -- never record a verdict)."""
+    with _capture_thread() as buf:
+        res = is_object_nuclear(identifier, quiet=True, _mute=False)
+    if res[2] is not None:
+        return (*res, "ok")
+    text = "".join(buf).lower()
+    if any(m in text for m in _NUCLEAR_SERVICE_MARKERS):
+        return (None, None, None, "service_error")
+    return (None, None, None, "no_host")
+
 
 # --------------------------------------------------------------------------- #
 #  Stage 5: Gaia DR3 AGN / QSO-candidate annotation
@@ -1054,9 +1154,11 @@ def plot_lightcurve(result, savepath=None):
 #   "nohost" iinuclear returned nothing (no host catalogue, or an error); retried up to
 #            NUC_MAX_ATTEMPTS times, then parked.
 # Records are dropped once their first detection is older than STATE_KEEP_DAYS.
-STATE_VERSION = 2
+STATE_VERSION = 3
 STATE_DEFAULT = os.path.join(_HERE, "state", "scan_state.json")
 NUC_MAX_ATTEMPTS = 3
+NUC_BREAKER = 20           # consecutive iinuclear service failures that stop the nuclear stage
+NUC_RETRY_SLEEP = 15       # seconds before the 1st re-try of a failed lookup (x3 before the 2nd)
 STATE_KEEP_DAYS = MAX_AGE_DAYS + 10
 CACHED_KEYS = (("is_nuclear", "nuclear_pvalue", "nuclear_sigma", "gaia_agn", "gaia_agn_grade",
                 "gaia_agn_prob", "gaia_agn_sep_arcsec", "gaia_agn_z") + tuple(SPEC_COLUMNS))
@@ -1112,6 +1214,14 @@ class ScanState:
             _stage(f"State    : {path} unreadable ({type(exc).__name__}: {exc}); starting empty "
                    f"(it will be rewritten)")
             return st
+        migrated = 0
+        if doc.get("version") == 2 and doc.get("params") == params:
+            # v2 recorded iinuclear PanSTARRS/ALeRCE outages as "nohost". Those verdicts are
+            # unreliable, so drop them (the objects are simply screened again).
+            recs = doc.get("records", {})
+            keep = {o: r for o, r in recs.items() if r.get("s") != "nohost"}
+            migrated = len(recs) - len(keep)
+            doc["records"], doc["version"] = keep, STATE_VERSION
         if doc.get("version") != STATE_VERSION or doc.get("params") != params:
             st.readonly = True
             _stage(f"State    : {path} was built with different settings "
@@ -1119,7 +1229,8 @@ class ScanState:
             return st
         st.rec = doc.get("records", {})
         st.gaia = doc.get("gaia", {})
-        _stage(f"State    : loaded {len(st.rec)} object verdicts and {len(st.gaia)} Gaia star checks from {path}")
+        _stage(f"State    : loaded {len(st.rec)} object verdicts and {len(st.gaia)} Gaia star checks from {path}"
+               + (f" (dropped {migrated} old 'no host' verdicts that may have been service errors)" if migrated else ""))
         return st
 
     def save(self, now_mjd):
@@ -1318,16 +1429,44 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
            f"{len(tracked_blue)} tracked candidates, {len(blue_new)} newly blue; "
            f"{n_dropped} tracked candidates dropped (no longer blue)")
 
-    # Stage 4: nuclear test -- only on objects never tested before.
+    # Stage 4: nuclear test -- only on objects never tested before. iinuclear hides its own
+    # network failures, so nuclear_check() says whether "no answer" means "no host" (a real
+    # verdict, recorded) or "PanSTARRS/ALeRCE errored" (retried here, then left undecided so the
+    # next run tries again). A run of consecutive service failures stops the stage early.
     _stage(f"Stage 4  nuclear : testing {len(blue_new)} newly blue objects (iinuclear, newest first)...")
-    nuc = _parallel_map(lambda s: is_object_nuclear(s["oid"]), blue_new, workers,
+    nuc_lock, nuc_fail = threading.Lock(), {"run": 0, "tripped": False}
+
+    def _nuclear_task(s):
+        if nuc_fail["tripped"]:
+            return (None, None, None, "skipped")
+        for attempt in range(3):
+            res = nuclear_check(s["oid"])
+            if res[3] != "service_error":
+                break
+            if attempt < 2:
+                time.sleep(NUC_RETRY_SLEEP * (3 ** attempt))
+        with nuc_lock:
+            if res[3] == "service_error":
+                nuc_fail["run"] += 1
+                if nuc_fail["run"] >= NUC_BREAKER and not nuc_fail["tripped"]:
+                    nuc_fail["tripped"] = True
+                    _stage(f"   !! {nuc_fail['run']} iinuclear lookups in a row failed (PanSTARRS / ALeRCE "
+                           f"errors): stopping the nuclear stage; the rest is retried next run")
+            else:
+                nuc_fail["run"] = 0
+        return res
+
+    nuc = _parallel_map(_nuclear_task, blue_new, workers,
                         on_error=lambda s, exc: print(f"    [nuclear failed for {s['oid']}: {exc}]"),
                         label="nuclear", budget_min=bud(0.06))
-    tested, undetermined = set(), []
-    for s, (is_nuc, p_val, sigma) in nuc:
+    tested, undetermined, n_svc = set(), [], 0
+    for s, (is_nuc, p_val, sigma, status) in nuc:
+        if status in ("service_error", "skipped"):
+            n_svc += 1                                   # no verdict recorded: it will be retried
+            continue
         s["is_nuclear"], s["nuclear_pvalue"], s["nuclear_sigma"] = is_nuc, p_val, sigma
         tested.add(s["oid"])
-        if sigma is None:
+        if sigma is None:                                # catalogs answered, nothing to measure against
             undetermined.append(s["oid"])
             tries = state.rec.get(s["oid"], {}).get("n", 0) + 1
             state.mark(s["oid"], "nohost", s["ndet"], s["firstmjd"], now_mjd, n=tries)
@@ -1339,7 +1478,7 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
                 and s.get("nuclear_sigma") is not None and s["nuclear_sigma"] <= sigma_max]
     n_far = sum(1 for s in blue_new if s["oid"] in tested
                 and s.get("nuclear_sigma") is not None and s["nuclear_sigma"] > sigma_max)
-    n_unreached = len(blue_new) - len(tested)
+    n_unreached = len(blue_new) - len(tested) - n_svc
     finalists = tracked_blue + newly_ok
     # Tracked candidates whose refresh failed or ran out of time: publish the last known row.
     fresh = {s["oid"] for s in photo_pass}
@@ -1348,11 +1487,12 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
     finalists += stale
     _stage(f"Stage 4  nuclear : {len(finalists)} candidates within {sigma_max:g}sigma of host "
            f"({len(tracked_blue)} refreshed, {len(stale)} last-known, {len(newly_ok)} new; "
-           f"of the new tests {n_far} farther, {len(undetermined)} no host / undetermined"
+           f"of the new tests {n_far} farther, {len(undetermined)} no PS1/SDSS host"
+           + (f"; {n_svc} lookups failed on PanSTARRS/ALeRCE errors -> retried next run" if n_svc else "")
            + (f"; {n_unreached} not reached yet -> next run" if n_unreached else "") + ")")
     if undetermined:
-        print(f"         host-undetermined (no PS1/SDSS catalog match; worth a "
-              f"manual look): {', '.join(undetermined)}")
+        shown = ", ".join(undetermined[:25]) + (f", ... (+{len(undetermined) - 25} more)" if len(undetermined) > 25 else "")
+        print(f"         no PS1/SDSS host (worth a manual look): {shown}")
     state.save(now_mjd)          # checkpoint: the expensive part is now banked
 
     # Candidates the bulk X-Match never answered for (service down, or an earlier run): one

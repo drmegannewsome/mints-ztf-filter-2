@@ -2,7 +2,7 @@ name: ZTF scan
 
 on:
   schedule:
-    - cron: "0 13 * * *"        # 13:00 UTC daily (~08:00 Austin)
+    - cron: "23 13 * * *"       # 13:23 UTC daily (~08:23 Austin); off the congested top of the hour
   workflow_dispatch:
     inputs:
       days:
@@ -41,7 +41,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
+      # `ref` = the branch TIP when this job actually starts. Without it a run that waited in
+      # the queue (behind another scan) checks out the commit that existed when it was
+      # QUEUED -- missing the other run's results, redoing its work and then conflicting on push.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      # A daily run that GitHub starts late, right after a manual scan, is skipped.
+      - name: Skip a scheduled run that follows a recent scan
+        id: guard
+        if: github.event_name == 'schedule'
+        run: |
+          skip=false
+          if [ -f docs/last_run.txt ]; then
+            last=$(head -n1 docs/last_run.txt)
+            then_s=$(date -u -d "$last" +%s 2>/dev/null || echo 0)
+            age=$(( $(date -u +%s) - then_s ))
+            echo "last scan stamp: $last (${age}s ago)"
+            if [ "$age" -lt 36000 ]; then skip=true; echo "-> a scan finished less than 10 h ago; skipping this scheduled run"; fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -77,6 +97,7 @@ jobs:
 
       - name: Run scan
         id: scan
+        if: steps.guard.outputs.skip != 'true'
         env:
           # The `||` fallbacks supply the scheduled-run values, since `inputs`
           # is empty on a cron trigger. Keep them in step with the dispatch
@@ -105,7 +126,7 @@ jobs:
       # `!cancelled()` rather than the default success(): if the scan stops early
       # (time budget, nothing finished) its per-object progress in state/ is still banked.
       - name: Stamp the run
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.guard.outputs.skip != 'true' }}
         run: |
           {
             date -u +"%Y-%m-%dT%H:%M:%SZ"
@@ -114,13 +135,28 @@ jobs:
             if [ -f scan_partial.txt ]; then cat scan_partial.txt; fi
           } > docs/last_run.txt
 
+      # Keep the results even if the push below fails (they cost hours to produce).
+      - name: Save results as a workflow artifact
+        if: ${{ !cancelled() && steps.guard.outputs.skip != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-results
+          path: |
+            docs/candidates.csv
+            docs/last_run.txt
+            state/scan_state.json
+          retention-days: 14
+          if-no-files-found: ignore
+
       - name: Commit results
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.guard.outputs.skip != 'true' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/candidates.csv docs/last_run.txt
           if [ -f state/scan_state.json ]; then git add state/scan_state.json; fi
           git diff --staged --quiet || git commit -m "Automated ZTF scan $(date -u +%F)"
-          git pull --rebase
+          # These files are regenerated in full each run, so if someone else pushed meanwhile,
+          # this run's version wins any conflict ("theirs" = the commit being replayed).
+          git pull --rebase -X theirs
           git push

@@ -55,6 +55,16 @@ star check is skipped for that run (it costs about a minute, not hours). Objects
 one against the Gaia archive ("Stage 4b"), and objects not yet checked are retried in bulk on later runs. Nothing needs changing when
 CDS comes back.
 
+**Service errors are never turned into verdicts.** iinuclear hides its own network failures, so a PanSTARRS or ALeRCE outage used to
+look like "no host". The scan now tells the two apart: a real "no PS1/SDSS host" is recorded (and retried up to 3 times), while a failed
+lookup is retried in place, left undecided, and stops the nuclear stage if 20 in a row fail. ALeRCE 429s slow every thread down together
+and the pace recovers on its own.
+
+**Runs never overlap or go stale.** Scans share one queue (`concurrency`), each checks out the latest commit when it starts, a daily
+run that GitHub starts less than 10 h after another scan is skipped, results are also saved as a workflow artifact (14 days), and the
+push prefers the new results if the branch moved. Nothing re-triggers a scan automatically: the only triggers are the daily cron and the
+manual button (GitHub often starts the cron run hours late).
+
 Rough cost of a cold start over 90 days (~17,000 objects): ALeRCE photometry runs at ~150 objects/min with `--rate 5`, i.e. about
 2 hours; iinuclear is quick (~200 blue objects in under 2 minutes). Once the state file is full, a daily run only handles the ~200 new
 objects plus the tracked candidates.
