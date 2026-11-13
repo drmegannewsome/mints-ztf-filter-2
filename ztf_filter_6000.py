@@ -49,12 +49,14 @@ import sys
 import json
 import time
 import threading
+import collections
 import contextlib
 import warnings
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import numpy as np
 import pandas as pd
 import requests
+from astropy.table import Table
 from astropy.time import Time
 from astropy.coordinates import SkyCoord
 import astropy.units as u
@@ -114,22 +116,32 @@ except Exception:
     pass
 
 from astroquery.gaia import Gaia
-from iinuclear.utils import get_data, get_galaxy_center, check_nuclear
+from iinuclear.utils import (get_data, get_galaxy_center, check_nuclear, query_panstarrs,
+                             query_sdss, calc_separations)
+try:                                  # Legacy Survey Tractor host positions (see ls_reference.py)
+    import ls_reference as _LS
+except Exception:                     # missing/broken module: the scan still runs on PS1/SDSS
+    _LS = None
 
 # ZTF filter ids in ALeRCE
 FID_G, FID_R = 1, 2
 
 # Tunables
 COLOR_BLUE_THRESHOLD = -0.05   # g - r < this  ==>  "blue"
-GR_MATCH_WINDOW_DAYS = 2.0     # max |t_g - t_r| to call a g/r pair one epoch
+GR_MATCH_WINDOW_DAYS = 1.5     # max |t_g - t_r| to call a g AND r night one epoch (i band is never used)
 NIGHT_GAP_DAYS = 0.5           # gap that separates one night from the next (per band)
-MIN_EPOCHS = 3                 # need 3 matched epochs (latest 1 vs prior 2; color uses 3)
+MIN_EPOCHS = 3                 # need 3 matched g+r epochs (colour uses the latest 3; rise = latest vs prior 2)
 N_COLOR_EPOCHS = 3             # color uses the 3 latest matched epochs
 MAG_ERR_FLOOR = 0.01           # guard against zero/NaN photometric errors
 MAX_AGE_DAYS = 90.0            # "found in the last 3 months"
 MIN_DETECTIONS = 5             # coarse Stage-1 ndet pre-filter
-NUCLEAR_SIGMA_MAX = 1.0        # keep transients within this many sigma of host
+NUCLEAR_P_MIN = 0.05           # iinuclear's own rule: nuclear if p > 0.05 ...
+NUCLEAR_SIGMA_MAX = float(np.sqrt(-2.0 * np.log(NUCLEAR_P_MIN)))   # ... = sigma <= 2.4477 (2 dof: p = exp(-sigma^2/2))
 FORCED_MAX_MAGERR = 0.30       # keep forced-phot points at least ~3-sigma (SNR>~3)
+HOST_UNCLEAR_SEP_ARCSEC = 5.0   # a host whose centre is MORE than this from the ZTF position ...
+HOST_UNCLEAR_ERR_ARCSEC = 3.0   # ... AND whose error is at least this is no usable reference: "Host Unclear"
+REQUIRE_POSITIVE_DIFF = True   # only points where the source is BRIGHTER than the reference (isdiffpos = +1).
+                               # A negative difference is a subtraction residual / variable star, not a transient rising
 
 # CV/Nova rejection (forced-photometry light-curve classifier)
 CVNOVA_CLASSIFIER = "lc_classifier_BHRF_forced_phot"  # verify via query_classifiers()
@@ -142,6 +154,7 @@ GAIA_PM_SIG_THRESH = 5.0
 GAIA_PLX_SIG_THRESH = 5.0
 GAIA_PROXIMITY_ARCSEC = 1.0    # reject transients within this of a (bright) Gaia star
 GAIA_PROXIMITY_MAXMAG = 19.0   # ...only if that Gaia source is at least this bright (Gmag)
+XMATCH_EMPTY_SUSPECT = 100     # a bulk X-Match request this big that returns NO row is a glitch, not a result
 # Gaia DR3 QSO-candidate annotation (Stage 5; informational, never a cut)
 GAIA_AGN_MATCH_RADIUS_ARCSEC = 2.0
 GAIA_AGN_MIN_PROB = 0.25        # 0 = flag any qso_candidates match; raise to purify
@@ -319,6 +332,24 @@ def _with_retries(func, *args, _tries=5, _base_delay=2.0, _quiet=False, **kwargs
 
 _thread_local = threading.local()
 
+# Gaia archive (since the Oct 2026 release): at most 5 parallel jobs per user and a queue of 50; jobs
+# beyond that are rejected. With --workers 8 the per-object star / AGN checks would be rejected and
+# (failing open) let stars through, so they share a few slots and retry.
+_GAIA_SLOTS = threading.BoundedSemaphore(3)
+_GAIA_RETRY_BASE = 3.0
+
+
+def _gaia_call(fn, tries=2):
+    for k in range(tries):
+        with _GAIA_SLOTS:
+            try:
+                return fn()
+            except Exception as exc:
+                if k == tries - 1:
+                    raise
+                wait = _GAIA_RETRY_BASE * (2 ** k) * (5 if _is_rate_limit_error(exc) else 1)
+        time.sleep(wait)
+
 
 def _get_client():
     if not hasattr(_thread_local, "client"):
@@ -494,11 +525,26 @@ def query_cvnova_oids(client, days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS,
 # --------------------------------------------------------------------------- #
 #  Stage 2: difference photometry (alert + forced) -> matched g/r epochs
 # --------------------------------------------------------------------------- #
-def get_difference_photometry(oid, client, use_forced=True, debug_forced=False):
+def _positive_mask(sign, n):
+    """True where a point is a POSITIVE difference (source brighter than the reference). ZTF/ALeRCE code it
+    as +1/-1 (or 't'/'f'); a missing value is kept, and so is everything if there is no such column."""
+    if sign is None:
+        return np.ones(n, dtype=bool)
+    ser = pd.Series(np.asarray(sign))
+    num = pd.to_numeric(ser, errors="coerce")
+    if num.notna().any():
+        return ((num > 0) | num.isna()).to_numpy()
+    txt = ser.astype(str).str.strip().str.lower()
+    return (~txt.isin(["f", "false", "-1", "n", "no", "neg"])).to_numpy()
+
+
+def get_difference_photometry(oid, client, use_forced=True, debug_forced=False, return_positions=False):
     """Return (bands, ra, dec). bands = {1:(mjd,mag,err) g, 2:(...) r}, combining
     alert difference photometry (query_detections: magpsf/sigmapsf) and -- if
     use_forced -- significant ZTF forced difference photometry. ra/dec = median
-    detection position. Set debug_forced=True to print the forced-photometry
+    detection position. With return_positions=True a 4th value is returned: (ras, decs), the
+    finite per-detection alert positions -- the very arrays iinuclear would otherwise re-fetch
+    from ALeRCE for the nuclear test. Set debug_forced=True to print the forced-photometry
     columns and how many points were merged (use on a single object)."""
     def _q(fn):
         try:
@@ -517,16 +563,20 @@ def get_difference_photometry(oid, client, use_forced=True, debug_forced=False):
     dec0 = float(np.median(dec_all[pos_ok])) if pos_ok.any() else np.nan
 
     per_band = {FID_G: [[], [], []], FID_R: [[], [], []]}   # mjd, mag, err
+    counts = {"alert_g": 0, "alert_r": 0, "alert_i": 0, "forced_gr": 0, "negative_gr": 0}
 
-    def _add(mjd, fid, mag, err, max_err=None):
+    def _add(mjd, fid, mag, err, max_err=None, sign=None):
         mjd = np.asarray(mjd, dtype=float)
         fid = np.asarray(fid, dtype=float)
         mag = np.asarray(mag, dtype=float)
         err = np.asarray(err, dtype=float)
+        pos = _positive_mask(sign, len(mjd)) if REQUIRE_POSITIVE_DIFF else np.ones(len(mjd), bool)
         n_kept, n_finite = 0, 0
         for f in (FID_G, FID_R):
             base = ((fid == f) & np.isfinite(mjd) & np.isfinite(mag)
                     & np.isfinite(err) & (err > 0))
+            counts["negative_gr"] += int((base & ~pos).sum())      # dropped: source fainter than the reference
+            base &= pos
             n_finite += int(base.sum())
             sel = (base & (err <= max_err)) if max_err is not None else base
             per_band[f][0].extend(mjd[sel])
@@ -535,7 +585,11 @@ def get_difference_photometry(oid, client, use_forced=True, debug_forced=False):
             n_kept += int(sel.sum())
         return n_kept, n_finite
 
-    _add(det["mjd"], det["fid"], det["magpsf"], det["sigmapsf"])
+    _add(det["mjd"], det["fid"], det["magpsf"], det["sigmapsf"],
+         sign=det["isdiffpos"] if "isdiffpos" in det.columns else None)
+    fid_det = np.asarray(det["fid"], dtype=float)
+    counts.update(alert_g=int((fid_det == FID_G).sum()), alert_r=int((fid_det == FID_R).sum()),
+                  alert_i=int((fid_det == 3).sum()))                     # i band is only counted, never used
 
     if use_forced:
         try:
@@ -549,7 +603,9 @@ def get_difference_photometry(oid, client, use_forced=True, debug_forced=False):
             errcol = next((c for c in ("e_mag", "sigmapsf", "emag", "mag_err", "e_mag_corr") if c in fp.columns), None)
             fidcol = "fid" if "fid" in fp.columns else next((c for c in ("band", "filterid") if c in fp.columns), None)
             if magcol and errcol and "mjd" in fp.columns and fidcol:
-                n_kept, n_finite = _add(fp["mjd"], fp[fidcol], fp[magcol], fp[errcol], max_err=FORCED_MAX_MAGERR)
+                n_kept, n_finite = _add(fp["mjd"], fp[fidcol], fp[magcol], fp[errcol], max_err=FORCED_MAX_MAGERR,
+                                        sign=fp["isdiffpos"] if "isdiffpos" in fp.columns else None)
+                counts["forced_gr"] = int(n_kept)
                 if debug_forced:
                     print(f"    [forced: {len(fp)} rows; {n_finite} finite g/r detections, "
                           f"kept {n_kept} with e_mag<={FORCED_MAX_MAGERR} "
@@ -567,6 +623,9 @@ def get_difference_photometry(oid, client, use_forced=True, debug_forced=False):
         err = np.asarray(per_band[f][2], dtype=float)
         order = np.argsort(mjd)
         bands[f] = (mjd[order], mag[order], err[order])
+    bands["counts"] = counts          # diagnostics only; every loop over bands uses FID_G / FID_R
+    if return_positions:
+        return bands, ra0, dec0, (ra_all[pos_ok], dec_all[pos_ok])
     return bands, ra0, dec0
 
 
@@ -638,13 +697,17 @@ def measure_rise(epochs):
 
 def screen_photometry(oid, client, use_forced=True, debug_forced=False):
     """Stage 2/3 per object. Returns a result dict, or None if too few epochs."""
-    bands, ra0, dec0 = get_difference_photometry(oid, client, use_forced=use_forced,
-                                                 debug_forced=debug_forced)
+    bands, ra0, dec0, (ras, decs) = get_difference_photometry(
+        oid, client, use_forced=use_forced, debug_forced=debug_forced, return_positions=True)
     epochs = build_gr_epochs(bands)
     if len(epochs) < MIN_EPOCHS:
         return None
     out = {"oid": oid, "ztf_name": oid, "ra": ra0, "dec": dec0,
-           "n_matched_epochs": len(epochs), "_bands": bands, "_epochs": epochs}
+           "n_matched_epochs": len(epochs), "_bands": bands, "_epochs": epochs,
+           "n_alert_g": bands["counts"]["alert_g"], "n_alert_r": bands["counts"]["alert_r"],
+           "n_alert_i": bands["counts"]["alert_i"], "n_forced_gr": bands["counts"]["forced_gr"],
+           "n_negative_gr": bands["counts"]["negative_gr"],
+           "_ras": ras, "_decs": decs}
     out.update(measure_color(epochs))
     out.update(measure_rise(epochs))
     return out
@@ -665,7 +728,7 @@ def is_gaia_star(ra, dec, radius_arcsec=GAIA_MATCH_RADIUS_ARCSEC,
     coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
     try:
         with _silence(quiet):
-            r = Gaia.cone_search_async(coord, radius=radius_arcsec * u.arcsec).get_results()
+            r = _gaia_call(lambda: Gaia.cone_search_async(coord, radius=radius_arcsec * u.arcsec).get_results())
     except Exception as exc:
         if not quiet:
             print(f"    [Gaia query failed at {ra:.5f},{dec:.5f}: {exc}]")
@@ -768,12 +831,17 @@ def gaia_star_mask(positions, radius_arcsec=GAIA_MATCH_RADIUS_ARCSEC,
                        "pm_sig": float(pm_sig) if np.isfinite(pm_sig) else None,
                        "plx_sig": float(plx_sig) if np.isfinite(plx_sig) else None})
 
-    def _xmatch(sub):
+    def _xmatch(sub, guard=True):
         tbl = Table(rows=sub, names=["oid", "ra", "dec"])
         with _silence(quiet):
-            return _with_retries(XMatch.query, cat1=tbl, cat2="vizier:I/355/gaiadr3",
-                                 max_distance=radius_arcsec * u.arcsec,
-                                 colRA1="ra", colDec1="dec", _tries=2)
+            res = _with_retries(XMatch.query, cat1=tbl, cat2="vizier:I/355/gaiadr3",
+                                max_distance=radius_arcsec * u.arcsec,
+                                colRA1="ra", colDec1="dec", _tries=2)
+        if guard and len(sub) >= XMATCH_EMPTY_SUSPECT and (res is None or len(res) == 0):
+            # Many of these objects always have a Gaia counterpart; an empty table would mark ALL
+            # of them "not a star" for good, so treat it as a failed request (retried smaller).
+            raise RuntimeError(f"X-Match returned no rows for {len(sub)} objects (service glitch?)")
+        return res
 
     def _conn_error(exc):
         msg = f"{type(exc).__name__} {exc}".lower()
@@ -808,15 +876,25 @@ def gaia_star_mask(positions, radius_arcsec=GAIA_MATCH_RADIUS_ARCSEC,
                 continue
             print("    [retrying as 4 smaller requests]")
         step, ok_parts = max(1, (len(sub) + 3) // 4), 0
+        answers = []
         for j in range(0, len(sub), step):
             part = sub[j:j + step]
             try:
-                _parse(_xmatch(part), part)
-                ok_parts += 1
+                answers.append((part, _xmatch(part, guard=False)))
             except Exception as exc:
                 n_failed += _give_up(part, "failed")
                 print(f"    [Gaia X-Match failed for {len(part)} objects: {str(exc)[:200]}; keeping them "
                       f"unchecked (re-checked on a later run)]")
+        if len(sub) >= XMATCH_EMPTY_SUSPECT and answers and all(r is None or len(r) == 0 for _p, r in answers):
+            # same glitch test as in _xmatch, on the whole chunk: do not record "no Gaia source" for everyone
+            print(f"    [X-Match answered {len(sub)} objects with no rows at all (service glitch?); "
+                  f"keeping them unchecked (re-checked on a later run)]")
+            for part, _r in answers:
+                n_failed += _give_up(part, "empty")
+            answers = []
+        for part, res in answers:
+            _parse(res, part)
+            ok_parts += 1
         bad_in_a_row = 0 if ok_parts else bad_in_a_row + 1
         if bad_in_a_row >= 2 and not tripped:
             _stage("   !! two X-Match chunks failed in a row: skipping the bulk star check for this run")
@@ -841,10 +919,25 @@ def _clear_iinuclear_cache(name, base_dir="."):
                 pass
 
 
+def _detection_positions(ras, decs):
+    """Finite float arrays of the per-detection positions, or None if there are < 2 (the
+    positional covariance in check_nuclear needs at least two)."""
+    if ras is None or decs is None:
+        return None
+    ras, decs = np.asarray(ras, dtype=float), np.asarray(decs, dtype=float)
+    ok = np.isfinite(ras) & np.isfinite(decs)
+    return (ras[ok], decs[ok]) if ok.sum() >= 2 else None
+
+
 def is_object_nuclear(identifier, quiet=True, _retry=True, _mute=True):
     """Return (is_nuclear, p_value, sigma); all None if no usable host catalog or
     on error. plot=False skips iinuclear's (unused) image download. A 'used_catalog'
-    crash usually means a stale/empty cached catalog -> clear it and retry once."""
+    crash usually means a stale/empty cached catalog -> clear it and retry once.
+
+    This is iinuclear's OWN pipeline (it fetches the detections from ALeRCE itself and uses its
+    SDSS-then-PS1 host). The scan does not use it any more: see nuclear_check(), which is given
+    the positions Stage 2 already has and picks the host reference itself. It remains for
+    objects with < 2 usable detections positions and for iinuclear-only comparisons."""
     try:
         with _silence(quiet and _mute):
             try:
@@ -875,22 +968,128 @@ def is_object_nuclear(identifier, quiet=True, _retry=True, _mute=True):
 
 # iinuclear swallows its own network errors and just prints them, so a catalog or ALeRCE
 # outage looks exactly like "this galaxy has no host". These are the messages that mean
-# the SERVICE failed (the SDSS one is not listed: "no SDSS objects here" prints it too).
+# the SERVICE failed. SDSS is handled separately (_sdss_service_error): its "no SDSS objects
+# here" case prints an "Error querying SDSS: ... rename_column" line that is NOT a failure.
 _NUCLEAR_SERVICE_MARKERS = ("error querying panstarrs", "error querying alerce",
                             "nuclear check failed")
 
 
-def nuclear_check(identifier):
-    """is_object_nuclear plus a verdict on WHY there is no answer. Returns
-    (is_nuclear, p_value, sigma, status) with status 'ok' (sigma measured), 'no_host'
-    (the catalogs answered and there is nothing to measure against) or 'service_error'
-    (PanSTARRS / ALeRCE errored: unknown, so try again later -- never record a verdict)."""
+def _sdss_service_error(text):
+    """True if iinuclear's captured output holds an SDSS error other than the benign
+    'no SDSS objects in this field' one (None.rename_column). A SkyServer outage looks like
+    the former and, if PS1 then finds nothing, would be cached as 'no host'."""
+    return any(ln.strip().startswith("error querying sdss") and "rename_column" not in ln
+               for ln in text.splitlines())
+
+
+def _catalog_reference(kind, ra_c, dec_c):
+    """Host reference from SDSS or PS1 via iinuclear's own query functions (same 3" cone, same
+    catalogue columns, same get_galaxy_center), but with the failure mode made explicit:
+    returns (status, ref) with status 'ok' | 'no_host' | 'service_error'. iinuclear's query
+    functions swallow their errors into a printed line, so the captured text is what tells
+    "the server refused / is down" (SDSS has been answering with HTTP 403 pages) from
+    "nothing there"."""
+    with _capture_thread() as buf:
+        try:
+            res = (query_panstarrs if kind == "PS1" else query_sdss)(ra_c, dec_c)
+        except Exception as exc:
+            print(f"Error querying {'PanSTARRS' if kind == 'PS1' else 'SDSS'}: {exc}")
+            res = None
+    text = "".join(buf).lower()
+    if res is None or len(res) == 0:
+        failed = ("error querying panstarrs" in text) if kind == "PS1" else _sdss_service_error(text)
+        return ("service_error" if failed else "no_host"), None
+    if kind == "PS1":
+        i = int(np.argmin(np.asarray(res["distance"], dtype=float)))
+    else:
+        i = int(np.argmin(np.asarray(calc_separations(res["ra"], res["dec"], ra_c, dec_c), dtype=float)))
+    try:
+        gc = _astuple(get_galaxy_center(Table(res[i:i + 1])))
+        ra_g, dec_g, err = float(gc[GALCENTER_RA_IDX]), float(gc[GALCENTER_DEC_IDX]), float(gc[GALCENTER_ERR_IDX])
+    except Exception:
+        return "no_host", None          # catalogue row without usable positions
+    if not (np.isfinite(ra_g) and np.isfinite(dec_g) and np.isfinite(err)):
+        return "no_host", None
+    sep = float(np.hypot((ra_g - ra_c) * np.cos(np.radians(dec_c)), dec_g - dec_c) * 3600.0)
+    return "ok", {"ref": kind, "ra": ra_g, "dec": dec_g, "err": err, "type": "", "sep": sep}
+
+
+def _host_unclear(ref):
+    """A reference so far off and so uncertain that the sigma test against it means nothing."""
+    return (ref is not None and ref.get("sep") is not None and ref.get("err") is not None
+            and ref["sep"] > HOST_UNCLEAR_SEP_ARCSEC and ref["err"] >= HOST_UNCLEAR_ERR_ARCSEC)
+
+
+def find_host_reference(ras, decs, use_legacy=True, notes=None):
+    """Where is the host, and how well do we know it?  Tries the Legacy Survey Tractor
+    catalogue first (where there is coverage), then PS1, then SDSS as the last resort; the first
+    that has a source within 3" of the median detection position wins.
+    Returns (ref_dict_or_None, status, failed): status 'ok' (a host), 'no_host' (EVERY
+    reference answered and there is nothing), or 'service_error' (nothing found but at least one
+    reference could not be asked: unknown, so no verdict). `failed` lists the references that
+    errored; a host found by a later one is still used (and its name recorded). A host that is
+    "unclear" (centre > HOST_UNCLEAR_SEP_ARCSEC from the ZTF position with an error >=
+    HOST_UNCLEAR_ERR_ARCSEC) counts as no host from that reference; `notes` (a list) gets a line for each."""
+    ra_c, dec_c = float(np.median(ras)), float(np.median(decs))
+    failed = []
+
+    def _usable(ref):
+        if _host_unclear(ref):
+            if notes is not None:
+                notes.append(f"{ref['ref']} host rejected: centre {ref['sep']:.1f}\" from the ZTF position, "
+                             f"error {ref['err']:.1f}\"")
+            return False
+        return True
+
+    if use_legacy and _LS is not None:
+        info, status = _LS.tractor_reference(ras, decs)
+        if status == "ok":
+            ref = {"ref": "LS", "ra": info["ra"], "dec": info["dec"], "err": info["err_arcsec"],
+                   "type": info["type"], "sep": info["sep_arcsec"]}
+            if _usable(ref):
+                return ref, "ok", failed
+        if status == "service_error":
+            failed.append("LS")
+    for kind in ("PS1", "SDSS"):
+        status, ref = _catalog_reference(kind, ra_c, dec_c)
+        if status == "ok" and _usable(ref):
+            return ref, "ok", failed
+        if status == "service_error":
+            failed.append(kind)
+    return None, ("service_error" if failed else "no_host"), failed
+
+
+def nuclear_check(identifier, ras=None, decs=None, info=None, use_legacy=True):
+    """Nuclear test for one object. Returns (is_nuclear, p_value, sigma, status) with status
+    'ok' (sigma measured), 'no_host' (every reference answered; nothing to measure against) or
+    'service_error' (unknown: try again later -- never record a verdict).
+
+    With the detection positions (ras, decs; the scan has them from Stage 2) the host comes
+    from find_host_reference() and NOTHING is fetched from ALeRCE -- iinuclear's get_data() would
+    download the very same detections again. Without them (or with < 2), iinuclear's own
+    pipeline runs as before. `info` (dict) is filled with ref ('LS'/'PS1'/'SDSS'), host_type,
+    host_sep, host_err and failed (references that errored)."""
+    known = _detection_positions(ras, decs)
+    if known is not None:
+        ras_k, decs_k = known
+        notes = []
+        ref, status, failed = find_host_reference(ras_k, decs_k, use_legacy=use_legacy, notes=notes)
+        if info is not None:
+            info.update(failed=failed, rejected=notes)
+        if ref is None:
+            return (None, None, None, status)
+        sig, _chi, p, flag = _astuple(check_nuclear(ras_k, decs_k, ref["ra"], ref["dec"], ref["err"]))
+        if info is not None:
+            info.update(ref=ref["ref"], host_type=ref["type"], host_sep=ref["sep"], host_err=ref["err"])
+        if not np.isfinite(sig):          # degenerate positions (singular covariance): nothing to say
+            return (None, None, None, "no_host")
+        return (bool(flag), float(p), float(sig), "ok")
     with _capture_thread() as buf:
         res = is_object_nuclear(identifier, quiet=True, _mute=False)
     if res[2] is not None:
         return (*res, "ok")
     text = "".join(buf).lower()
-    if any(m in text for m in _NUCLEAR_SERVICE_MARKERS):
+    if any(m in text for m in _NUCLEAR_SERVICE_MARKERS) or _sdss_service_error(text):
         return (None, None, None, "service_error")
     return (None, None, None, "no_host")
 
@@ -964,7 +1163,7 @@ def gaia_agn_flag(ra, dec, radius_arcsec=GAIA_AGN_MATCH_RADIUS_ARCSEC,
                             radius_deg=radius_arcsec / 3600.0)
     try:
         with _silence(quiet):
-            res = _with_retries(lambda: Gaia.launch_job(adql).get_results(), _quiet=quiet)
+            res = _with_retries(lambda: _gaia_call(lambda: Gaia.launch_job(adql).get_results(), tries=1), _tries=2, _quiet=quiet)
     except Exception as exc:
         if not quiet:
             print(f"    [Gaia AGN query failed at {ra:.5f},{dec:.5f}: {exc}]")
@@ -1020,7 +1219,7 @@ def gaia_agn_flag(ra, dec, radius_arcsec=GAIA_AGN_MATCH_RADIUS_ARCSEC,
 
 SPEC_COLUMNS = ["spec_checked", "has_archival_spec", "spec_survey", "spec_type",
                 "spec_z", "spec_zwarn", "spec_sep_arcsec", "spec_targetid",
-                "spec_n_matches", "spec_url"]
+                "spec_n_matches", "spec_url", "spec_agn", "spec_agn_why"]
 
 
 def _import_desi_crossmatch():
@@ -1041,6 +1240,20 @@ def _unrounded_z(vac_path, vac_row, fallback):
         return fallback
 
 
+def _desi_agn_why(m):
+    """Why a DESI VAC row counts as an AGN, or None. SPECTYPE == QSO (the Redrock fit) or the VAC's own
+    AGN_ANY bit (AGN_MASKBITS bit 0: QuasarNet / MgII / broad lines / BPT / UV / WISE ... any AGN diagnostic)."""
+    why = []
+    if str(m.get("SPECTYPE") or "").strip().upper() == "QSO":
+        why.append("SPECTYPE=QSO")
+    try:
+        if int(m.get("AGN_MASKBITS") or 0) & 1:
+            why.append(f"AGN_ANY (AGN_MASKBITS={int(m['AGN_MASKBITS'])})")
+    except (TypeError, ValueError):
+        pass
+    return " + ".join(why) or None
+
+
 def desi_archival_spectrum(ra, dec, xm, vac_path, radius_arcsec=SPEC_MATCH_RADIUS_ARCSEC):
     """Look up one position; returns a dict keyed by SPEC_COLUMNS.
 
@@ -1055,10 +1268,13 @@ def desi_archival_spectrum(ra, dec, xm, vac_path, radius_arcsec=SPEC_MATCH_RADIU
                                  verbose=False, path=vac_path)
     if not matches:
         out["has_archival_spec"] = False
+        out["spec_agn"] = False
         return out
     clean = [m for m in matches
              if m["ZWARN"] == 0 and m["Z"] is not None and m["SPECTYPE"] != "STAR"]
     best = (clean or matches)[0]             # matches come back sorted by separation
+    whys = [w for w in (_desi_agn_why(m) for m in (clean or matches)) if w]
+    out["spec_agn"], out["spec_agn_why"] = bool(whys), (whys[0] if whys else None)
     out.update(has_archival_spec=True, spec_survey="DESI",
                spec_type=best["SPECTYPE"], spec_zwarn=best["ZWARN"],
                spec_sep_arcsec=round(best["separation_arcsec"], 3),
@@ -1090,7 +1306,7 @@ def annotate_archival_spectra(finalists, vac_path=None, radius_arcsec=SPEC_MATCH
               f"spec_* columns left blank")
         return
 
-    n_spec = n_z = n_fail = 0
+    n_spec = n_z = n_fail = n_agn_spec = 0
     for s in finalists:
         if not (np.isfinite(s["ra"]) and np.isfinite(s["dec"])):
             n_fail += 1
@@ -1103,8 +1319,9 @@ def annotate_archival_spectra(finalists, vac_path=None, radius_arcsec=SPEC_MATCH
             continue
         n_spec += bool(s["has_archival_spec"])
         n_z += s["spec_z"] is not None
+        n_agn_spec += bool(s.get("spec_agn"))
     _stage(f"Stage 6  spectra : {n_spec}/{len(finalists)} have a DESI VAC spectrum within "
-          f"{radius_arcsec:g}\" ({n_z} with a clean redshift, {n_fail} not checked)")
+          f"{radius_arcsec:g}\" ({n_z} with a clean redshift, {n_agn_spec} classified QSO/AGN -> 'In Likely AGN', {n_fail} not checked)")
 
 
 # --------------------------------------------------------------------------- #
@@ -1154,20 +1371,21 @@ def plot_lightcurve(result, savepath=None):
 #   "nohost" iinuclear returned nothing (no host catalogue, or an error); retried up to
 #            NUC_MAX_ATTEMPTS times, then parked.
 # Records are dropped once their first detection is older than STATE_KEEP_DAYS.
-STATE_VERSION = 3
+STATE_VERSION = 4
 STATE_DEFAULT = os.path.join(_HERE, "state", "scan_state.json")
 NUC_MAX_ATTEMPTS = 3
 NUC_BREAKER = 20           # consecutive iinuclear service failures that stop the nuclear stage
 NUC_RETRY_SLEEP = 15       # seconds before the 1st re-try of a failed lookup (x3 before the 2nd)
 STATE_KEEP_DAYS = MAX_AGE_DAYS + 10
-CACHED_KEYS = (("is_nuclear", "nuclear_pvalue", "nuclear_sigma", "gaia_agn", "gaia_agn_grade",
+CACHED_KEYS = (("is_nuclear", "nuclear_pvalue", "nuclear_sigma", "nuclear_ref", "host_type", "host_err", "host_sep",
+                "host_unclear", "host_note", "gaia_agn", "gaia_agn_grade",
                 "gaia_agn_prob", "gaia_agn_sep_arcsec", "gaia_agn_z") + tuple(SPEC_COLUMNS))
 
 
 def _state_params(use_forced):
     """Settings a cached verdict depends on. If any differ, the file is not reused."""
     return {"blue": COLOR_BLUE_THRESHOLD, "min_epochs": MIN_EPOCHS, "n_color": N_COLOR_EPOCHS,
-            "match_days": GR_MATCH_WINDOW_DAYS, "forced": bool(use_forced),
+            "match_days": GR_MATCH_WINDOW_DAYS, "forced": bool(use_forced), "positive_diff": REQUIRE_POSITIVE_DIFF,
             "gaia": [GAIA_MATCH_RADIUS_ARCSEC, GAIA_PM_SIG_THRESH, GAIA_PLX_SIG_THRESH,
                      GAIA_PROXIMITY_ARCSEC, GAIA_PROXIMITY_MAXMAG]}
 
@@ -1261,8 +1479,8 @@ class ScanState:
         """Record a blue object whose nuclear test has been run. Beyond sigma_max only
         the nuclear numbers are kept; within it, the full output row."""
         row = {k: v for k, v in s.items() if not k.startswith("_")}
-        if s.get("nuclear_sigma") is None or s["nuclear_sigma"] > sigma_max:
-            row = {k: row.get(k) for k in ("is_nuclear", "nuclear_pvalue", "nuclear_sigma")}
+        if not s.get("host_unclear") and (s.get("nuclear_sigma") is None or s["nuclear_sigma"] > sigma_max):
+            row = {k: row.get(k) for k in ("is_nuclear", "nuclear_pvalue", "nuclear_sigma", "nuclear_ref")}
         self.mark(s["oid"], "nuc", s.get("ndet"), s.get("firstmjd"), now_mjd, c=_clean(row))
 
     def plan(self, oids, meta, now_mjd, sigma_max, recheck_not_blue_days=0):
@@ -1290,8 +1508,9 @@ class ScanState:
             elif st == "nohost":
                 work.append(oid) if r.get("n", 0) < NUC_MAX_ATTEMPTS else skip("no host (parked)")
             elif st == "nuc":
-                sg = (r.get("c") or {}).get("nuclear_sigma")
-                track.append(oid) if (sg is not None and sg <= sigma_max) else skip("not nuclear")
+                c = r.get("c") or {}
+                sg = c.get("nuclear_sigma")
+                track.append(oid) if (c.get("host_unclear") or (sg is not None and sg <= sigma_max)) else skip("not nuclear")
             else:
                 work.append(oid)
         return work, track, skipped
@@ -1307,8 +1526,13 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
              agn_min_prob=GAIA_AGN_MIN_PROB,
              check_spectra=True, spec_vac=None, spec_radius=SPEC_MATCH_RADIUS_ARCSEC,
              max_minutes=0, plotdir=None, client=None,
-             state_path=None, reset_state=False, recheck_not_blue_days=0):
-    """state_path: JSON file of per-object verdicts (see ScanState). With it, only
+             state_path=None, reset_state=False, recheck_not_blue_days=0, legacy_survey=True,
+             recheck_stars=False):
+    """recheck_stars: also re-run the one-by-one Gaia archive star check on EVERY candidate that is about
+    to be published, ignoring the cached verdicts (default off; see Stage 4b).
+    legacy_survey: use the Legacy Survey Tractor host position first (then PS1, then SDSS as the
+    last resort); False = PS1 then SDSS only.
+    state_path: JSON file of per-object verdicts (see ScanState). With it, only
     objects not yet decided are screened and tracked candidates just get fresh
     photometry. None = stateless (screen everything, as before).
 
@@ -1433,25 +1657,34 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
     # network failures, so nuclear_check() says whether "no answer" means "no host" (a real
     # verdict, recorded) or "PanSTARRS/ALeRCE errored" (retried here, then left undecided so the
     # next run tries again). A run of consecutive service failures stops the stage early.
-    _stage(f"Stage 4  nuclear : testing {len(blue_new)} newly blue objects (iinuclear, newest first)...")
+    _stage(f"Stage 4  nuclear : testing {len(blue_new)} newly blue objects (host reference: "
+           f"{'Legacy Survey, ' if legacy_survey and _LS is not None else ''}PS1, then SDSS as last resort; newest first)...")
     nuc_lock, nuc_fail = threading.Lock(), {"run": 0, "tripped": False}
 
     def _nuclear_task(s):
         if nuc_fail["tripped"]:
             return (None, None, None, "skipped")
+        info = {}
         for attempt in range(3):
-            res = nuclear_check(s["oid"])
+            info = {}
+            res = nuclear_check(s["oid"], s.get("_ras"), s.get("_decs"), info=info, use_legacy=legacy_survey)
             if res[3] != "service_error":
                 break
             if attempt < 2:
                 time.sleep(NUC_RETRY_SLEEP * (3 ** attempt))
+        if res[3] == "ok":
+            s["nuclear_ref"], s["host_type"] = info.get("ref"), info.get("host_type") or None
+            s["host_err"], s["host_sep"] = info.get("host_err"), info.get("host_sep")
+            s["_ref_failed"] = info.get("failed") or []
+        elif res[3] == "no_host":
+            s["host_note"] = "; ".join(info.get("rejected") or []) or "no source within 3\" in any reference catalogue"
         with nuc_lock:
             if res[3] == "service_error":
                 nuc_fail["run"] += 1
                 if nuc_fail["run"] >= NUC_BREAKER and not nuc_fail["tripped"]:
                     nuc_fail["tripped"] = True
-                    _stage(f"   !! {nuc_fail['run']} iinuclear lookups in a row failed (PanSTARRS / ALeRCE "
-                           f"errors): stopping the nuclear stage; the rest is retried next run")
+                    _stage(f"   !! {nuc_fail['run']} host lookups in a row failed (Legacy Survey / PanSTARRS / "
+                           f"SDSS / ALeRCE errors): stopping the nuclear stage; the rest is retried next run")
             else:
                 nuc_fail["run"] = 0
         return res
@@ -1466,50 +1699,71 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
             continue
         s["is_nuclear"], s["nuclear_pvalue"], s["nuclear_sigma"] = is_nuc, p_val, sigma
         tested.add(s["oid"])
-        if sigma is None:                                # catalogs answered, nothing to measure against
+        if sigma is None:                                # every catalogue answered; none gives a usable host
+            s["host_unclear"] = True                     # published as a candidate, in its own "Host Unclear" bin
             undetermined.append(s["oid"])
-            tries = state.rec.get(s["oid"], {}).get("n", 0) + 1
-            state.mark(s["oid"], "nohost", s["ndet"], s["firstmjd"], now_mjd, n=tries)
-        else:
-            state.put_candidate(s, now_mjd, sigma_max)
+        state.put_candidate(s, now_mjd, sigma_max)
     for s in tracked_blue:                              # keep their stored row current
         state.put_candidate(s, now_mjd, sigma_max)
     newly_ok = [s for s in blue_new if s["oid"] in tested
-                and s.get("nuclear_sigma") is not None and s["nuclear_sigma"] <= sigma_max]
+                and (s.get("host_unclear") or (s.get("nuclear_sigma") is not None and s["nuclear_sigma"] <= sigma_max))]
     n_far = sum(1 for s in blue_new if s["oid"] in tested
                 and s.get("nuclear_sigma") is not None and s["nuclear_sigma"] > sigma_max)
     n_unreached = len(blue_new) - len(tested) - n_svc
+    refs_used = collections.Counter(s.get("nuclear_ref") for s in blue_new
+                                    if s["oid"] in tested and s.get("nuclear_sigma") is not None)
+    if refs_used:
+        n_fb = sum(1 for s in blue_new if s.get("_ref_failed"))
+        _stage("Stage 4  nuclear : host reference used: "
+               + ", ".join(f"{k} {v}" for k, v in sorted(refs_used.items(), key=lambda kv: -kv[1]))
+               + (f"; {n_fb} used a later reference because an earlier one errored" if n_fb else ""))
     finalists = tracked_blue + newly_ok
     # Tracked candidates whose refresh failed or ran out of time: publish the last known row.
     fresh = {s["oid"] for s in photo_pass}
     stale = [dict((state.rec[o].get("c") or {})) for o in track if o not in fresh]
     stale = [c for c in stale if "oid" in c]
     finalists += stale
-    _stage(f"Stage 4  nuclear : {len(finalists)} candidates within {sigma_max:g}sigma of host "
+    _stage(f"Stage 4  nuclear : {len(finalists)} candidates within {sigma_max:g}sigma of host or with an unclear host "
            f"({len(tracked_blue)} refreshed, {len(stale)} last-known, {len(newly_ok)} new; "
-           f"of the new tests {n_far} farther, {len(undetermined)} no PS1/SDSS host"
-           + (f"; {n_svc} lookups failed on PanSTARRS/ALeRCE errors -> retried next run" if n_svc else "")
+           f"of the new tests {n_far} farther, {len(undetermined)} Host Unclear (no usable host in any reference)"
+           + (f"; {n_svc} lookups failed on service errors -> retried next run" if n_svc else "")
            + (f"; {n_unreached} not reached yet -> next run" if n_unreached else "") + ")")
     if undetermined:
         shown = ", ".join(undetermined[:25]) + (f", ... (+{len(undetermined) - 25} more)" if len(undetermined) > 25 else "")
-        print(f"         no PS1/SDSS host (worth a manual look): {shown}")
+        print(f"         Host Unclear (published in their own bin): {shown}")
     state.save(now_mjd)          # checkpoint: the expensive part is now banked
 
     # Candidates the bulk X-Match never answered for (service down, or an earlier run): one
     # Gaia archive cone search each. A few hundred at most, instead of all ~17k objects.
     if reject_stars:
-        unchecked = [s for s in finalists if s["oid"] not in state.gaia]
+        if recheck_stars:
+            unchecked = list(finalists)
+        else:
+            unchecked = [s for s in finalists if s["oid"] not in state.gaia]
         if unchecked:
-            _stage(f"Stage 4b stars  : {len(unchecked)} candidates were not star-checked in bulk; "
-                   f"checking them one by one (Gaia archive)...")
+            _stage(f"Stage 4b stars  : "
+                   + (f"re-checking all {len(unchecked)} candidates (--recheck-stars; cached verdicts ignored)"
+                      if recheck_stars else f"{len(unchecked)} candidates were not star-checked in bulk")
+                   + "; one by one (Gaia archive)...")
             res = _parallel_map(
                 lambda s: is_gaia_star(s["ra"], s["dec"]), unchecked, workers,
                 on_error=lambda s, exc: print(f"    [Gaia star check failed for {s['oid']}: {exc}]"),
                 label="gaia-star", budget_min=bud(0.12))
-            n_star = 0
+            n_star = n_flipped = n_nomatch = 0
             for s, (is_star, info) in res:
                 if info.get("gaia_query_failed"):
                     continue                                   # unknown: kept, retried next run
+                if recheck_stars:
+                    before = state.gaia.get(s["oid"])
+                    n_flipped += bool(is_star) and not (before and before[0])
+                    n_nomatch += not info.get("gaia_match")
+                    what = ("no Gaia source within %.1f\"" % GAIA_MATCH_RADIUS_ARCSEC if not info.get("gaia_match") else
+                            "Gaia source %.2f\" away, G=%s, pm_sig=%s, plx_sig=%s" % (
+                                info.get("gaia_sep_arcsec") or float("nan"), info.get("gaia_gmag"),
+                                None if info.get("pm_sig") is None else round(info["pm_sig"], 1),
+                                None if info.get("plx_sig") is None else round(info["plx_sig"], 1)))
+                    print(f"         recheck {s['oid']}: {'STAR' if is_star else 'not a star'} ({what})"
+                          + ("  <-- newly rejected" if is_star and not (before and before[0]) else ""))
                 rnd = lambda v: None if v is None else round(float(v), 2)
                 state.gaia[s["oid"]] = [int(is_star), _clean(s.get("firstmjd")),
                                         rnd(info.get("pm_sig")), rnd(info.get("plx_sig"))]
@@ -1517,7 +1771,9 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
                 n_star += bool(is_star)
             finalists = [s for s in finalists if not state.gaia.get(s["oid"], [0])[0]]
             _stage(f"Stage 4b stars  : {n_star} of the {len(unchecked)} are Gaia stars and were removed; "
-                   f"{len(res) - n_star} confirmed non-stellar; {len(unchecked) - len(res)} not checked")
+                   f"{len(res) - n_star} confirmed non-stellar; {len(unchecked) - len(res)} not checked"
+                   + (f" ({n_flipped} newly rejected by the re-check; {n_nomatch} have no Gaia source "
+                      f"within {GAIA_MATCH_RADIUS_ARCSEC:g}\")" if recheck_stars else ""))
 
     if require_rising:
         finalists = [s for s in finalists if s["is_rising"]]
@@ -1555,7 +1811,7 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
                                   spec_vac, spec_radius)
 
     for s in finalists:                                # bank the AGN / spectrum results
-        if s.get("nuclear_sigma") is not None:
+        if s.get("nuclear_sigma") is not None or s.get("host_unclear"):
             state.put_candidate(s, now_mjd, sigma_max)
     state.save(now_mjd)
 
@@ -1572,9 +1828,11 @@ def run_scan(days=MAX_AGE_DAYS, min_ndet=MIN_DETECTIONS, max_objects=None,
 def results_table(finalists):
     # latest_mag = combined g/r *difference-image* magnitude of the latest matched
     # epoch (the review page's "latest epoch brighter than" cut).
-    cols = ["oid", "ra", "dec", "firstmjd", "ndet", "n_matched_epochs", "gr_color", "is_blue",
+    cols = ["oid", "ra", "dec", "firstmjd", "ndet", "n_matched_epochs",
+            "n_alert_g", "n_alert_r", "n_alert_i", "n_forced_gr", "n_negative_gr", "gr_color", "is_blue",
             "is_rising", "delta_mag", "latest_mag", "is_star", "gaia_pm_sig", "gaia_plx_sig",
-            "nuclear_sigma", "nuclear_pvalue", "is_nuclear",
+            "nuclear_sigma", "nuclear_pvalue", "is_nuclear", "nuclear_ref", "host_type", "host_err", "host_sep",
+            "host_unclear", "host_note",
             "gaia_agn", "gaia_agn_grade", "gaia_agn_prob",
             "gaia_agn_sep_arcsec", "gaia_agn_z"] + SPEC_COLUMNS
     rows = [{c: s.get(c) for c in cols} for s in finalists]
@@ -1611,9 +1869,17 @@ def classify_one(name, client=None, want_plot=False, reject_stars=True, use_forc
     if reject_stars:
         s["is_star"], ginfo = is_gaia_star(s["ra"], s["dec"])
         s["gaia_pm_sig"] = ginfo.get("pm_sig"); s["gaia_plx_sig"] = ginfo.get("plx_sig")
+        print(f"    Gaia star check: {ginfo if ginfo else 'no position'}")
     else:
         s["is_star"] = None
-    s["is_nuclear"], s["nuclear_pvalue"], s["nuclear_sigma"] = is_object_nuclear(name)
+    _info = {}
+    (s["is_nuclear"], s["nuclear_pvalue"], s["nuclear_sigma"], _status) = nuclear_check(
+        name, s.get("_ras"), s.get("_decs"), info=_info)
+    s["nuclear_ref"], s["host_type"] = _info.get("ref"), _info.get("host_type") or None
+    s["host_err"], s["host_sep"] = _info.get("host_err"), _info.get("host_sep")
+    if _status != "ok":
+        print(f"{name}: nuclear test gave no result ({_status.replace('_', ' ')}"
+              + (f"; failed: {', '.join(_info['failed'])}" if _info.get("failed") else "") + ")")
     s["gaia_agn"], _agn = gaia_agn_flag(s["ra"], s["dec"], quiet=False)
     s["gaia_agn_grade"] = _agn.get("grade")
     s["gaia_agn_prob"] = _agn.get("qso_prob")
@@ -1636,7 +1902,8 @@ def classify_one(name, client=None, want_plot=False, reject_stars=True, use_forc
             where = f"{s['ra']:.5f}, {s['dec']:.5f}"
             if s["has_archival_spec"]:
                 print(f"    DESI VAC: {s['spec_type']}  z={s['spec_z']}  ZWARN={s['spec_zwarn']}  "
-                      f"sep={s['spec_sep_arcsec']}\"  ({s['spec_n_matches']} row(s))  {s['spec_url']}")
+                      f"sep={s['spec_sep_arcsec']}\"  ({s['spec_n_matches']} row(s))  {s['spec_url']}"
+                      + (f"  -> AGN ({s['spec_agn_why']})" if s.get("spec_agn") else ""))
             else:
                 print(f"    DESI VAC: no row within {spec_radius:g}\" of ({where}) "
                       f"[this position was searched]")
@@ -1655,7 +1922,7 @@ if __name__ == "__main__":
     p.add_argument("--max-objects", type=int, default=None, help="cap recent objects screened (testing)")
     p.add_argument("--workers", type=int, default=1, help="parallel threads for per-object stages (default 1; 4-8 with --rate)")
     p.add_argument("--rate", type=float, default=5.0, help="max ALeRCE requests/sec across threads (default 5; 0 disables)")
-    p.add_argument("--sigma-max", type=float, default=NUCLEAR_SIGMA_MAX, help="keep transients within this many sigma of host (default 1.0)")
+    p.add_argument("--sigma-max", type=float, default=NUCLEAR_SIGMA_MAX, help="keep transients within this many sigma of host (default 2.4477, i.e. iinuclear's p > 0.05)")
     p.add_argument("--no-forced", action="store_true", help="use alert photometry only (skip forced photometry)")
     p.add_argument("--keep-cvnova", action="store_true", help="skip the CV/Nova classifier cut")
     p.add_argument("--cvnova-prob", type=float, default=CVNOVA_PROB, help="CV/Nova probability above which to reject (default 0.3)")
@@ -1689,6 +1956,11 @@ if __name__ == "__main__":
                         "(default: state/scan_state.json next to this script)")
     p.add_argument("--no-state", action="store_true", help="ignore and do not write the state file (screen everything)")
     p.add_argument("--reset-state", action="store_true", help="discard the state file and rebuild it from scratch")
+    p.add_argument("--recheck-stars", action="store_true",
+                   help="re-run the one-by-one Gaia archive star check on every candidate about to be published, "
+                        "ignoring cached verdicts (default off; for a manual run after Gaia errors)")
+    p.add_argument("--no-legacy-survey", action="store_true",
+                   help="do not use Legacy Survey Tractor host positions (PS1, then SDSS only)")
     p.add_argument("--recheck-not-blue-days", type=float, default=0,
                    help="also re-screen objects judged 'not blue' while they are younger than this many "
                         "days and have gained detections (default 0 = never re-screen them)")
@@ -1721,7 +1993,9 @@ if __name__ == "__main__":
                              plotdir=args.plotdir if args.plot else None,
                              state_path=None if args.no_state else args.state,
                              reset_state=args.reset_state,
-                             recheck_not_blue_days=args.recheck_not_blue_days)
+                             recheck_not_blue_days=args.recheck_not_blue_days,
+                             legacy_survey=not args.no_legacy_survey,
+                             recheck_stars=args.recheck_stars)
         if args.max_minutes:
             import faulthandler
             faulthandler.cancel_dump_traceback_later()

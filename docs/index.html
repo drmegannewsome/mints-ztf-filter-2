@@ -78,6 +78,7 @@
     position: sticky; top: 0; z-index: 1; font-weight: 700;
   }
   .group-header.agn { color: var(--agn); }
+  .group-header.unclear { color: var(--whitetext); font-style: italic; }
   .group-empty { padding: 8px 12px; font-size: 13px; color: var(--muted); font-style: italic; }
   .source-item {
     padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
@@ -99,6 +100,7 @@
   .badge.added { background: var(--border); }
   .badge.agn { background: var(--agn); color: #1c1500; }
   .badge.unk { background: var(--keep); }
+  .badge.desi { background: var(--agn); color: #1c1500; }
   .empty-msg { padding: 14px 12px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
 
   /* ---- right-hand column: filter bar, viewers, follow-up list ---- */
@@ -207,7 +209,7 @@
 
 <header>
   <h1>ZTF Nuclear Transient Review</h1>
-  <span class="sub">Blue (g&minus;r &lt; &minus;0.05), nuclear transients; stars and likely CVs removed</span>
+  <span class="sub">Blue (g&minus;r &lt; &minus;0.05), nuclear transients; stars and likely CVs removed. Each list is sorted bluest g&minus;r first</span>
   <span class="stamp" id="stampText"></span>
 </header>
 
@@ -418,7 +420,8 @@ function blankCandidate(oid) {
     nuclear_sigma: null, latest_mag: null, is_rising: null,
     gaia_agn: null, gaia_agn_grade: "", gaia_agn_prob: null, gaia_agn_z: null,
     spec_checked: false, has_archival_spec: false, spec_survey: "", spec_type: "",
-    spec_z: null, spec_url: "", manual: false
+    spec_z: null, spec_url: "", manual: false,
+    spec_agn: null, spec_agn_why: "", host_unclear: false, host_note: ""
   };
 }
 
@@ -438,7 +441,11 @@ function rowToCandidate(r) {
     spec_survey: r.spec_survey || "",
     spec_type: r.spec_type || "",
     spec_z: num(r.spec_z),
-    spec_url: r.spec_url || ""
+    spec_url: r.spec_url || "",
+    spec_agn: parseTriBool(r.spec_agn),
+    spec_agn_why: r.spec_agn_why || "",
+    host_unclear: parseTriBool(r.host_unclear) === true,
+    host_note: r.host_note || ""
   });
 }
 
@@ -575,9 +582,11 @@ function makeSourceItem(c) {
   if (c.manual || forced.has(c.oid)) badge("added", "added", "Added by hand");
   if (c.gaia_agn === true) {
     badge("AGN" + (c.gaia_agn_grade === "likely" ? "!" : "?"), "agn");
-  } else if (hasAgnColumn && c.gaia_agn === null) {
+  } else if (hasAgnColumn && c.gaia_agn === null && !desiAgn(c)) {
     badge("no AGN check", "unk");
   }
+  if (desiAgn(c)) badge("DESI AGN", "desi", "DESI spectrum: " + (c.spec_agn_why || "host classified as QSO"));
+  if (c.host_unclear) item.title = c.host_note || "No usable host galaxy position (nuclear test not possible)";
   item.appendChild(name);
 
   item.appendChild(el("div", "coords",
@@ -587,6 +596,7 @@ function makeSourceItem(c) {
   const bits = [];
   if (c.gr_color !== null) bits.push("g-r " + c.gr_color.toFixed(2));
   if (c.nuclear_sigma !== null) bits.push(c.nuclear_sigma.toFixed(2) + "σ");
+  else if (c.host_unclear) bits.push("host unclear");
   if (c.latest_mag !== null) bits.push("m " + c.latest_mag.toFixed(1));
   if (bits.length || c.spec_z !== null) {
     const line = el("div", "coords", bits.join("  |  "));
@@ -599,11 +609,42 @@ function makeSourceItem(c) {
   return item;
 }
 
-function appendGroup(parent, title, items, agnStyle) {
-  parent.appendChild(el("div", "group-header" + (agnStyle ? " agn" : ""),
+function appendGroup(parent, title, items, cls) {
+  parent.appendChild(el("div", "group-header" + (cls ? " " + cls : ""),
                         title + " (" + items.length + ")"));
   if (items.length === 0) { parent.appendChild(el("div", "group-empty", "none")); return; }
   items.forEach(c => parent.appendChild(makeSourceItem(c)));
+}
+
+/* A DESI spectrum whose host is a QSO or any AGN (spec_agn, from the scan) counts as AGN. CSVs written
+   before that column existed fall back to the DESI spectral type alone. */
+function desiAgn(c) {
+  if (c.spec_agn !== null) return c.spec_agn === true;
+  return String(c.spec_type || "").trim().toUpperCase() === "QSO";
+}
+function isLikelyAgn(c) { return c.gaia_agn === true || desiAgn(c); }
+
+/* Bluest g-r first (the most TDE/accretion-like colours on top); no colour sorts last, ties by name.
+   Applied to whatever survives the filters, so no filter setting changes the order. */
+function byColour(a, b) {
+  const x = a.gr_color === null ? Infinity : a.gr_color;
+  const y = b.gr_color === null ? Infinity : b.gr_color;
+  if (x !== y) return x < y ? -1 : 1;
+  return a.oid < b.oid ? -1 : a.oid > b.oid ? 1 : 0;
+}
+
+/* The three lists, in screen order. A host-unclear object always goes in its own list (the last one),
+   even when an AGN badge is also showing, because its nuclear test has no usable host. */
+function bins() {
+  const sorted = visible.slice().sort(byColour);
+  if (!hasAgnColumn && !visible.some(c => c.host_unclear || c.spec_agn !== null)) {
+    return [{ title: "Candidates", cls: "", items: sorted }];
+  }
+  return [
+    { title: "Not in Likely AGN", cls: "", items: sorted.filter(c => !c.host_unclear && !isLikelyAgn(c)) },
+    { title: "In Likely AGN", cls: "agn", items: sorted.filter(c => !c.host_unclear && isLikelyAgn(c)) },
+    { title: "Host Unclear", cls: "unclear", items: sorted.filter(c => c.host_unclear) }
+  ];
 }
 
 function renderSourceList() {
@@ -621,15 +662,12 @@ function renderSourceList() {
         "then press Apply."));
     return;
   }
-  if (!hasAgnColumn) { appendGroup(list, "Candidates", visible, false); return; }
-  appendGroup(list, "Not in Likely AGN", visible.filter(c => c.gaia_agn !== true), false);
-  appendGroup(list, "In Likely AGN", visible.filter(c => c.gaia_agn === true), true);
+  bins().forEach(b => appendGroup(list, b.title, b.items, b.cls));
 }
 
 /* Flat display order, so the arrow keys follow what's on screen. */
 function orderedCandidates() {
-  if (!hasAgnColumn) return visible;
-  return visible.filter(c => c.gaia_agn !== true).concat(visible.filter(c => c.gaia_agn === true));
+  return [].concat(...bins().map(b => b.items));
 }
 
 /* ------------------------------------------------------------ add a target */
@@ -763,8 +801,10 @@ function selectSource(oid) {
       (c.gaia_agn_prob !== null ? " (p=" + c.gaia_agn_prob.toFixed(2) + ")" : "") +
       (c.gaia_agn_z !== null ? " z_qsoc=" + c.gaia_agn_z.toFixed(3) : "")
     : "";
+  const desi = desiAgn(c) ? "  — DESI AGN: " + (c.spec_agn_why || "QSO") : "";
+  const hu = c.host_unclear ? "  — Host unclear" + (c.host_note ? " (" + c.host_note + ")" : "") : "";
   const zs = c.spec_z !== null ? "  — z = " + fmtZ(c.spec_z) + " (" + (c.spec_survey || "archival") + ")" : "";
-  $("currentSourceLabel").textContent = oid + coord + agn + zs;
+  $("currentSourceLabel").textContent = oid + coord + agn + desi + hu + zs;
 
   const btn = $("keepBtn");
   btn.disabled = false;
@@ -777,6 +817,7 @@ function selectSource(oid) {
 
 function agnLabel(c) {
   if (c.gaia_agn === true) return c.gaia_agn_grade === "likely" ? "likely" : "candidate";
+  if (desiAgn(c)) return "DESI";
   if (c.gaia_agn === false) return "no";
   return "unknown";
 }
@@ -838,7 +879,7 @@ function renderKeepTable() {
     tr.appendChild(el("td", "mono", k.dec !== null ? k.dec.toFixed(5) : "—"));
 
     const tdAgn = el("td", "mono", k.gaia_agn);
-    if (k.gaia_agn === "likely") tdAgn.style.color = "var(--agn)";
+    if (k.gaia_agn === "likely" || k.gaia_agn === "DESI") tdAgn.style.color = "var(--agn)";
     tr.appendChild(tdAgn);
 
     const tdSpec = el("td");

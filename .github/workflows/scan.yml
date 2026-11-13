@@ -16,10 +16,10 @@ on:
         options: ["4", "5", "8", "12", "20"]
         default: "4"
       sigma_max:
-        description: "Nuclear tolerance in sigma (--sigma-max) — does NOT affect runtime; sigmas are cached, so changing it never re-runs iinuclear"
+        description: "Nuclear tolerance in sigma (--sigma-max); 2.4477 = iinuclear's p > 0.05. Does NOT affect runtime; sigmas are cached, so changing it never re-runs iinuclear"
         type: choice
-        options: ["0.5", "1.0", "1.5", "2.0", "3.0"]
-        default: "2.0"
+        options: ["0.5", "1.0", "1.5", "2.0", "2.4477", "3.0"]
+        default: "2.4477"
       rising:
         description: "Require rising (--rising)"
         type: boolean
@@ -28,6 +28,14 @@ on:
         description: "Cap objects screened — leave blank for no cap (smoke tests only)"
         type: string
         default: ""
+      recheck_stars:
+        description: "Re-check stars on ALL current candidates, one by one against Gaia (--recheck-stars). Off for normal runs"
+        type: boolean
+        default: false
+      reset_state:
+        description: "Discard state/scan_state.json and rebuild it (--reset-state): a cold start, needed once after changing the epoch rules"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -104,9 +112,11 @@ jobs:
           # defaults above.
           DAYS:        ${{ inputs.days        || '90'  }}
           MIN_NDET:    ${{ inputs.min_ndet    || '4'   }}
-          SIGMA_MAX:   ${{ inputs.sigma_max   || '2.0' }}   # runtime-neutral; raise to keep more rows
+          SIGMA_MAX:   ${{ inputs.sigma_max   || '2.4477' }}   # runtime-neutral; = iinuclear's p > 0.05
           RISING:      ${{ inputs.rising      || 'false' }}
           MAX_OBJECTS: ${{ inputs.max_objects || ''    }}
+          RECHECK_STARS: ${{ inputs.recheck_stars || 'false' }}
+          RESET_STATE:   ${{ inputs.reset_state   || 'false' }}
         run: |
           set -euo pipefail
           ARGS=(--days "$DAYS"
@@ -120,6 +130,8 @@ jobs:
                 --out docs/candidates.csv)
           if [ "$RISING" = "true" ]; then ARGS+=(--rising); fi
           if [ -n "$MAX_OBJECTS" ]; then ARGS+=(--max-objects "$MAX_OBJECTS"); fi
+          if [ "$RECHECK_STARS" = "true" ]; then ARGS+=(--recheck-stars); fi
+          if [ "$RESET_STATE" = "true" ]; then ARGS+=(--reset-state); fi
           echo "+ python -u ztf_filter_6000.py ${ARGS[*]}"
           python -u ztf_filter_6000.py "${ARGS[@]}"
 
@@ -130,7 +142,7 @@ jobs:
         run: |
           {
             date -u +"%Y-%m-%dT%H:%M:%SZ"
-            echo "days=${{ inputs.days || '90' }} min_ndet=${{ inputs.min_ndet || '4' }} sigma_max=${{ inputs.sigma_max || '2.0' }} rising=${{ inputs.rising || 'false' }}"
+            echo "days=${{ inputs.days || '90' }} min_ndet=${{ inputs.min_ndet || '4' }} sigma_max=${{ inputs.sigma_max || '2.4477' }} rising=${{ inputs.rising || 'false' }} recheck_stars=${{ inputs.recheck_stars || 'false' }} reset_state=${{ inputs.reset_state || 'false' }}"
             echo "scan step: ${{ steps.scan.outcome }}"
             if [ -f scan_partial.txt ]; then cat scan_partial.txt; fi
           } > docs/last_run.txt
