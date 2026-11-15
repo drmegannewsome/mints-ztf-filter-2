@@ -1,4 +1,4 @@
-2026-11-15T01:26:54Z
+2026-11-15T22:48:55Z
 days=90 min_ndet=4 sigma_max=2.4477 rising=false recheck_stars=false reset_state=false
 scan step: success
-PARTIAL SCAN (time budget): photometry: 10710 of 17297 unfinished; gaia-star: 167 of 192 unfinished; gaia-agn: 188 of 188 unfinished
+PARTIAL SCAN (time budget): photometry: 10254 of 16918 unfinished; gaia-star: 165 of 192 unfinished; gaia-agn: 184 of 192 unfinished
