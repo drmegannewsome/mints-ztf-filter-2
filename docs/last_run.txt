@@ -1,4 +1,4 @@
-2026-11-25T01:37:41Z
+2026-11-26T00:55:17Z
 days=90 min_ndet=4 sigma_max=2.4477 rising=false recheck_stars=false reset_state=false
 scan step: success
-PARTIAL SCAN (time budget): photometry: 8617 of 15503 unfinished
+PARTIAL SCAN (time budget): photometry: 9137 of 15719 unfinished
